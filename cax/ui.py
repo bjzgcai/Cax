@@ -10,7 +10,7 @@ from textual.binding import Binding
 from textual.containers import Container
 from textual.widgets import Footer, Header, ListItem, ListView, Static
 
-from . import config, planner, render
+from . import planner, render
 from .models import Plan, Round
 
 
@@ -61,7 +61,7 @@ class PlanUIApp(App[UIResult]):
         Binding("space", "toggle_round", "Toggle RaMAx"),
         Binding("e", "edit_round", "Edit workdir (todo)"),
         Binding("p", "preview_plan", "Preview"),
-        Binding("s", "save_yaml", "Save YAML"),
+        Binding("s", "save_commands", "Save commands"),
         Binding("r", "run_plan", "Run"),
         Binding("q", "quit", "Quit"),
     ]
@@ -110,13 +110,15 @@ class PlanUIApp(App[UIResult]):
     def action_run_plan(self) -> None:
         self.exit(UIResult(plan=self.plan, action="run"))
 
-    def action_save_yaml(self) -> None:
+    def action_save_commands(self) -> None:
         output_dir = Path(self.plan.out_dir or self.base_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / "ramax_plan.yaml"
-        config.save_plan(self.plan, output_path)
+        output_path = output_dir / "ramax_commands.txt"
+        commands = planner.build_execution_plan(self.plan, self.base_dir)
+        lines = [cmd.shell_preview() for cmd in commands]
+        output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         if self.detail_panel:
-            self.detail_panel.update(f"Saved plan to {output_path}")
+            self.detail_panel.update(f"Saved commands to {output_path}")
 
     def action_quit(self) -> None:
         self.exit(UIResult(plan=self.plan, action="quit"))
