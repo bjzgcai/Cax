@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cactus-ramax"
+version = "0.1.0"
+description = "Interactive tooling for mixing cactus and RaMAx workflows"
+authors = [{name = "Cactus-RaMAx Team"}]
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "typer>=0.9",
+    "rich>=13",
+    "textual>=0.54",
+    "pydantic>=2.6",
+    "pyyaml>=6",
+    "psutil>=5",
+]
+
+[project.optional-dependencies]
+ui = ["textual>=0.54", "rich>=13"]
+
+[project.scripts]
+cax = "cax.cli:app"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["cax"]
+
+[tool.hatch.build.targets.sdist]
+include = ["cax", "examples", "tests", "README.md", "pyproject.toml"]
+
