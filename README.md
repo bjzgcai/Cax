@@ -58,16 +58,6 @@ cax ui
 - `cactus-prepare` 的原始输出会保存为 `steps-output/cax_prepare_debug.txt`（若 `--outDir` 变化则跟随调整），便于复现与排错。
 - 执行阶段会沿用原始计划中的日志目录（如 `steps-output/logs/`），每个步骤输出各自的 log 文件。
 
-## 从源代码构建
-
-开发者可使用以下命令运行单元测试、格式化等工具（若仓库包含对应脚本）：
-
-```bash
-pip install -r requirements-dev.txt  # 若提供
-pytest
-ruff check
-```
-
 ## 反馈
 
 欢迎提交 issue 或 PR，帮助我们继续完善 Cactus 与 RaMAx 的联合流程体验。
