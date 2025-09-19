@@ -28,18 +28,18 @@ pip install dist/cactus_ramax-*.whl
 直接运行：
 
 ```bash
-cax ui
+cax
 ```
 
 - 若未提供 `--prepare-args` 或 `--from-file`，程序会先弹出一个 Textual 输入框，提示你填写完整的 `cactus-prepare` 指令（例如 `cactus-prepare examples/... --outDir ...`）。
 - 按 Enter 后，工具会执行该指令、解析输出，并进入计划编辑界面。
 - 仍支持脚本化使用：
   ```bash
-  cax ui --prepare-args "examples/evolverMammals.txt --outDir steps-output --outSeqFile ... --outHal ... --jobStore jobstore"
+  cax --prepare-args "examples/evolverMammals.txt --outDir steps-output --outSeqFile ... --outHal ... --jobStore jobstore"
   ```
   或提供现有输出：
   ```bash
-  cax ui --from-file steps-output/prepare_output.txt
+  cax --from-file steps-output/prepare_output.txt
   ```
 
 ### 2. 在 UI 中操作
