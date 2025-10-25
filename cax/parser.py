@@ -234,7 +234,7 @@ def _parse_line_to_step(
     if expected_kind and kind != expected_kind:
         kind = expected_kind
     jobstore = _extract_jobstore(tokens)
-    root = _extract_root(tokens)
+    root = _extract_root(tokens, kind)
     log_file = _extract_log_file(tokens)
     out_files = _extract_outputs(tokens, kind)
     return Step(
@@ -280,7 +280,9 @@ def _extract_jobstore(tokens: list[str]) -> Optional[str]:
     return None
 
 
-def _extract_root(tokens: list[str]) -> Optional[str]:
+def _extract_root(tokens: list[str], kind: str) -> Optional[str]:
+    if kind == "halmerge" and len(tokens) >= 4:
+        return tokens[3]
     for idx, tok in enumerate(tokens):
         if tok == "--root" and idx + 1 < len(tokens):
             return tokens[idx + 1]
@@ -339,4 +341,3 @@ def _extract_prepare_args(command: str) -> dict[str, str]:
     if "out_seq_file" not in results:
         raise ParseError("Unable to extract --outSeqFile from cactus-prepare command")
     return results
-

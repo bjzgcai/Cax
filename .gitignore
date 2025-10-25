@@ -1,2 +1,4 @@
 cax/__pycache__/
 steps-output/
+jobstore/
+tests/__pycache__/

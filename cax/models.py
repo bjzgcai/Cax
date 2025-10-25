@@ -69,6 +69,7 @@ class Round(BaseModel):
     replace_with_ramax: bool = False
     workdir: Optional[str] = None
     ramax_opts: list[str] = Field(default_factory=list)
+    manual_ramax_command: Optional[str] = None
 
     @model_validator(mode="after")
     def _validate_round(self) -> "Round":
@@ -77,10 +78,6 @@ class Round(BaseModel):
         if (self.blast_step is None or self.align_step is None) and not self.replace_with_ramax:
             raise ValueError("blast_step and align_step required when not replacing with RaMAx")
         return self
-
-
-FallbackPolicy = Literal["cactus", "abort"]
-
 
 class Plan(BaseModel):
     """Full execution plan assembled from the parsed cactus-prepare script."""
@@ -92,7 +89,6 @@ class Plan(BaseModel):
     out_seq_file: str
     out_dir: Optional[str] = None
     dry_run: bool = False
-    fallback_policy: FallbackPolicy = "cactus"
     global_ramax_opts: list[str] = Field(default_factory=list)
 
     @field_validator("out_seq_file")

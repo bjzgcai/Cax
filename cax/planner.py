@@ -1,12 +1,13 @@
 """Translate plans into executable command sequences."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 import shlex
-from typing import Iterable, List, Optional
+from typing import List, Optional
 
 from .models import Plan, Round, Step
+from . import tree_utils
 
 
 @dataclass
@@ -20,7 +21,6 @@ class PlannedCommand:
     round_name: Optional[str] = None
     step: Optional[Step] = None
     is_ramax: bool = False
-    fallback_steps: list[Step] = field(default_factory=list)
     workdir: Optional[Path] = None
 
     def shell_preview(self) -> str:
@@ -35,13 +35,20 @@ def build_execution_plan(plan: Plan, base_dir: Optional[Path] = None) -> list[Pl
     base_dir = base_dir or Path.cwd()
     commands: list[PlannedCommand] = []
 
+    tree = tree_utils.build_alignment_tree(plan, base_dir=base_dir)
+    skip_roots = _compute_skipped_roots(plan, tree)
+
     for step in plan.preprocess:
         commands.append(_from_step(step, category="preprocess", base_dir=base_dir))
 
     for round_entry in plan.rounds:
+        if round_entry.root in skip_roots:
+            continue
         commands.extend(_round_commands(plan, round_entry, base_dir))
 
     for step in plan.hal_merges:
+        if step.root and step.root in skip_roots:
+            continue
         commands.append(_from_step(step, category="halmerge", base_dir=base_dir))
 
     return commands
@@ -53,7 +60,7 @@ def _round_commands(plan: Plan, round_entry: Round, base_dir: Path) -> list[Plan
 
     if round_entry.replace_with_ramax:
         cmds.append(
-            _ramax_command(plan, round_entry, base_dir, fallback_policy=plan.fallback_policy)
+            _ramax_command(plan, round_entry, base_dir)
         )
     else:
         if round_entry.blast_step:
@@ -109,32 +116,29 @@ def _from_step(
     )
 
 
-def _ramax_command(plan: Plan, round_entry: Round, base_dir: Path, fallback_policy: str) -> PlannedCommand:
+def _ramax_command(plan: Plan, round_entry: Round, base_dir: Path) -> PlannedCommand:
     workdir = round_entry.workdir
     if not workdir and plan.out_dir:
         workdir = str(Path(plan.out_dir) / "temps" / f"blast-{round_entry.root}")
-    command: list[str] = [
-        "RaMAx",
-        "-i",
-        plan.out_seq_file,
-        "-o",
-        round_entry.target_hal,
-        "--root",
-        round_entry.root,
-    ]
-    if workdir:
-        command.extend(["-w", workdir])
-    command.extend(plan.global_ramax_opts)
-    command.extend(round_entry.ramax_opts)
+
+    if round_entry.manual_ramax_command:
+        command = _split_command(round_entry.manual_ramax_command)
+    else:
+        command = [
+            "RaMAx",
+            "-i",
+            plan.out_seq_file,
+            "-o",
+            round_entry.target_hal,
+            "--root",
+            round_entry.root,
+        ]
+        if workdir:
+            command.extend(["-w", workdir])
+        command.extend(plan.global_ramax_opts)
+        command.extend(round_entry.ramax_opts)
 
     log_path = _guess_ramax_log_path(plan, round_entry, base_dir)
-
-    fallback_steps: list[Step] = []
-    if fallback_policy == "cactus":
-        if round_entry.blast_step:
-            fallback_steps.append(round_entry.blast_step)
-        if round_entry.align_step:
-            fallback_steps.append(round_entry.align_step)
 
     workdir_path = Path(workdir).expanduser() if workdir else None
     if workdir_path and not workdir_path.is_absolute():
@@ -147,7 +151,6 @@ def _ramax_command(plan: Plan, round_entry: Round, base_dir: Path, fallback_poli
         round_name=round_entry.name,
         step=None,
         is_ramax=True,
-        fallback_steps=fallback_steps,
         workdir=workdir_path,
     )
 
@@ -216,3 +219,21 @@ def _normalize_hal2fasta(command: List[str]) -> List[str]:
     if out_path:
         cleaned.extend(["--outFaPath", out_path])
     return cleaned
+
+
+def _compute_skipped_roots(plan: Plan, tree: Optional[tree_utils.AlignmentTree]) -> set[str]:
+    if tree is None:
+        return set()
+
+    skipped: set[str] = set()
+    for round_entry in plan.rounds:
+        node = tree.find(round_entry.root)
+        if not node:
+            continue
+        ancestor = node.parent
+        while ancestor:
+            if ancestor.round and ancestor.round.replace_with_ramax:
+                skipped.add(round_entry.root)
+                break
+            ancestor = ancestor.parent
+    return skipped
