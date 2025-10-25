@@ -39,7 +39,7 @@ class CommandTarget:
 class CommandSelectionModal(ModalScreen[CommandTarget | None]):
     """Modal dialog listing all editable commands for a round."""
 
-    BINDINGS = [Binding("escape", "cancel", "取消")]
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
     CSS = """
     CommandSelectionModal {
@@ -72,7 +72,7 @@ class CommandSelectionModal(ModalScreen[CommandTarget | None]):
 
     def compose(self) -> ComposeResult:
         with Container(id="picker-dialog"):
-            yield Static("选择要编辑的指令", id="picker-title")
+            yield Static("Choose a command to edit", id="picker-title")
             items = []
             for target in self.targets:
                 text = Text(target.label, style="bold")
@@ -82,7 +82,7 @@ class CommandSelectionModal(ModalScreen[CommandTarget | None]):
             list_view = ListView(*items, id="picker-list")
             self._list_view = list_view
             yield list_view
-            yield Static("Enter 确认，Esc 取消", id="picker-hint")
+            yield Static("Enter to confirm, Esc to cancel", id="picker-hint")
 
     def on_mount(self) -> None:
         if self._list_view:
@@ -101,9 +101,9 @@ class CommandEditModal(ModalScreen[str | None]):
     """Modal dialog allowing the user to edit a command string."""
 
     BINDINGS = [
-        Binding("escape", "cancel", "取消"),
-        Binding("ctrl+s", "save", "保存"),
-        Binding("enter", "save", "保存"),
+        Binding("escape", "cancel", "Cancel"),
+        Binding("ctrl+s", "save", "Save"),
+        Binding("enter", "save", "Save"),
     ]
 
     CSS = """
@@ -153,8 +153,8 @@ class CommandEditModal(ModalScreen[str | None]):
             self._status = status
             yield status
             with Container(id="editor-buttons"):
-                yield Button("保存", id="save", variant="success")
-                yield Button("取消", id="cancel")
+                yield Button("Save", id="save", variant="success")
+                yield Button("Cancel", id="cancel")
 
     def on_mount(self) -> None:
         if self._input:
@@ -171,7 +171,7 @@ class CommandEditModal(ModalScreen[str | None]):
         value = self._input.value.strip()
         if not value:
             if self._status:
-                self._status.update("指令不能为空")
+                self._status.update("Command cannot be empty")
             return
         self.dismiss(value)
 
@@ -209,8 +209,8 @@ class AlignmentTreeWidget(Tree[tree_utils.AlignmentNode]):
         for binding in Tree.BINDINGS
         if binding.key != "space"
     ] + [
-        Binding("space", "toggle_subtree", "切换子树", show=False),
-        Binding("ctrl+space", "toggle_node", "展开/折叠", show=False),
+        Binding("space", "toggle_subtree", "Toggle subtree", show=False),
+        Binding("ctrl+space", "toggle_node", "Expand/Collapse", show=False),
     ]
 
     def action_toggle_subtree(self) -> None:
@@ -239,12 +239,12 @@ class PlanUIApp(App[UIResult]):
     """
 
     BINDINGS = [
-        Binding("space", "toggle_round", "切换子树"),
-        Binding("e", "edit_round", "编辑指令"),
-        Binding("p", "preview_plan", "预览"),
-        Binding("s", "save_commands", "保存命令"),
-        Binding("r", "run_plan", "执行"),
-        Binding("q", "quit", "退出"),
+        Binding("space", "toggle_round", "Toggle subtree"),
+        Binding("e", "edit_round", "Edit command"),
+        Binding("p", "preview_plan", "Preview"),
+        Binding("s", "save_commands", "Save commands"),
+        Binding("r", "run_plan", "Run"),
+        Binding("q", "quit", "Quit"),
     ]
 
     def __init__(self, plan: Plan, base_dir: Optional[Path] = None):
@@ -302,16 +302,16 @@ class PlanUIApp(App[UIResult]):
             rounds = list(node.iter_rounds())
             if not rounds:
                 if self.detail_panel:
-                    self.detail_panel.update("该节点不包含可替换的 cactus 步骤。")
+                    self.detail_panel.update("This node has no cactus steps that can be replaced.")
                 return
             target_state = not all(round_entry.replace_with_ramax for round_entry in rounds)
             for round_entry in rounds:
                 round_entry.replace_with_ramax = target_state
             self._refresh_tree_labels(self.tree_widget.root)
             status = (
-                f"子树内 {len(rounds)} 个轮次已切换至 RaMAx"
+                f"Switched {len(rounds)} rounds in this subtree to RaMAx"
                 if target_state
-                else f"子树内 {len(rounds)} 个轮次已恢复为 cactus"
+                else f"Restored {len(rounds)} rounds in this subtree to cactus"
             )
             self._show_alignment_node(node, status=status)
             return
@@ -324,7 +324,7 @@ class PlanUIApp(App[UIResult]):
         round_entry = self.plan.rounds[index]
         round_entry.replace_with_ramax = not round_entry.replace_with_ramax
         self.round_items[index].update_content()
-        status = "已切换至 RaMAx" if round_entry.replace_with_ramax else "已恢复为 cactus"
+        status = "Switched to RaMAx" if round_entry.replace_with_ramax else "Restored to cactus"
         self._show_round(index, status=status)
 
     def action_preview_plan(self) -> None:
@@ -343,7 +343,7 @@ class PlanUIApp(App[UIResult]):
         lines = [cmd.shell_preview() for cmd in commands]
         output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         if self.detail_panel:
-            self.detail_panel.update(f"命令已保存到 {output_path}")
+            self.detail_panel.update(f"Commands saved to {output_path}")
 
     def action_quit(self) -> None:
         self.exit(UIResult(plan=self.plan, action="quit"))
@@ -353,7 +353,7 @@ class PlanUIApp(App[UIResult]):
             node = self._selected_alignment_node()
             if node is None or node.round is None:
                 if self.detail_panel:
-                    self.detail_panel.update("请选择包含 cactus 轮次的节点后再按 E。")
+                    self.detail_panel.update("Select a node with cactus rounds before pressing E.")
                 return
             try:
                 round_index = self.plan.rounds.index(node.round)
@@ -362,7 +362,7 @@ class PlanUIApp(App[UIResult]):
             targets = self._gather_command_targets(node.round)
             if not targets:
                 if self.detail_panel:
-                    self.detail_panel.update("当前节点没有可编辑的指令。")
+                    self.detail_panel.update("No editable commands in this node.")
                 return
             if len(targets) == 1:
                 self._open_command_editor(round_index, targets[0])
@@ -382,7 +382,7 @@ class PlanUIApp(App[UIResult]):
         targets = self._gather_command_targets(round_entry)
         if not targets:
             if self.detail_panel:
-                self.detail_panel.update("当前轮次没有可编辑的指令。")
+                self.detail_panel.update("No editable commands for this round.")
             return
         if len(targets) == 1:
             self._open_command_editor(index, targets[0])
@@ -414,7 +414,7 @@ class PlanUIApp(App[UIResult]):
         if round_entry.replace_with_ramax:
             ramax_preview = self._ramax_command_preview(round_entry)
             if ramax_preview:
-                details.extend(["", "[green]RaMAx 命令[/green]", ramax_preview])
+                details.extend(["", "[green]RaMAx command[/green]", ramax_preview])
         else:
             if round_entry.blast_step:
                 details.extend(["", "[cyan]cactus-blast[/cyan]", round_entry.blast_step.raw])
@@ -493,7 +493,7 @@ class PlanUIApp(App[UIResult]):
         if node.round:
             details.extend(self._round_details(node.round))
         else:
-            title = node.name or "(未命名节点)"
+            title = node.name or "(unnamed node)"
             details.append(f"[bold]{title}[/bold]")
         subtree_rounds = list(node.iter_rounds())
         if subtree_rounds:
@@ -501,11 +501,11 @@ class PlanUIApp(App[UIResult]):
             details.extend(
                 [
                     "",
-                    f"子树统计：RaMAx {replaced}/{len(subtree_rounds)} 个",
+                    f"Subtree summary: RaMAx {replaced}/{len(subtree_rounds)} rounds",
                 ]
             )
         else:
-            details.extend(["", "子树内不存在 cactus 轮次（叶子节点）。"])
+            details.extend(["", "No cactus rounds in this subtree (leaf node)."])
         if status:
             details.extend(["", f"[green]{status}[/green]"])
         self.detail_panel.update("\n".join(details))
@@ -541,7 +541,7 @@ class PlanUIApp(App[UIResult]):
 
     def _format_node_label(self, node: tree_utils.AlignmentNode) -> str:
         state = self._node_state(node)
-        name = node.name or "(未命名)"
+        name = node.name or "(unnamed)"
         if state == "leaf":
             return f"    {name}"
         marker = {"checked": "[x]", "unchecked": "[ ]", "mixed": "[-]"}[state]
@@ -582,7 +582,7 @@ class PlanUIApp(App[UIResult]):
         self._open_command_editor(round_index, target)
 
     def _open_command_editor(self, round_index: int, target: CommandTarget) -> None:
-        editor = CommandEditModal(f"编辑 {target.label} 指令", target.command)
+        editor = CommandEditModal(f"Edit {target.label} command", target.command)
         self.push_screen(
             editor,
             lambda new_command: self._apply_command_edit(round_index, target, new_command),
@@ -598,7 +598,7 @@ class PlanUIApp(App[UIResult]):
             round_entry.manual_ramax_command = new_command
         elif target.step is not None:
             target.step.raw = new_command
-        status = f"已更新 {target.label} 指令"
+        status = f"Updated {target.label} command"
         if self.alignment_tree and self.tree_widget:
             node = self._find_node_for_round(round_entry)
             if node:

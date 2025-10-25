@@ -50,7 +50,7 @@ def ui(
     if prepare_args is None and from_file is None:
         prompt_result = command_prompt.prompt_prepare_command()
         if prompt_result.action == "quit":
-            typer.echo("[cax] 已取消。")
+            typer.echo("[cax] Cancelled.")
             return
         prepare_args = prompt_result.args
         executable = prompt_result.executable or executable

@@ -39,8 +39,8 @@ class PrepareCommandPrompt(App[PromptResult]):
     """
 
     BINDINGS = [
-        Binding("escape", "quit", "退出"),
-        Binding("ctrl+c", "quit", "退出"),
+        Binding("escape", "quit", "Quit"),
+        Binding("ctrl+c", "quit", "Quit"),
     ]
 
     def __init__(self) -> None:
@@ -50,8 +50,8 @@ class PrepareCommandPrompt(App[PromptResult]):
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
-        yield Static("请输入完整的 cactus-prepare 指令，按 Enter 提交。", id="instructions")
-        command_input = Input(placeholder="cactus-prepare ...", id="command")
+        yield Static("Enter the full cactus-prepare command and press Enter to submit.", id="instructions")
+        command_input = Input(placeholder="cactus-prepare …", id="command")
         self._command_input = command_input
         yield command_input
         status = Static("", id="status")
@@ -66,19 +66,19 @@ class PrepareCommandPrompt(App[PromptResult]):
     def on_input_submitted(self, event: Input.Submitted) -> None:  # type: ignore[override]
         command = event.value.strip()
         if not command:
-            self._update_status("[red]命令不能为空[/red]")
+            self._update_status("[red]Command cannot be empty[/red]")
             return
         try:
             tokens = shlex.split(command)
         except ValueError as exc:
-            self._update_status(f"[red]命令解析失败：{exc}[/red]")
+            self._update_status(f"[red]Failed to parse command: {exc}[/red]")
             return
         if not tokens:
-            self._update_status("[red]命令不能为空[/red]")
+            self._update_status("[red]Command cannot be empty[/red]")
             return
         executable = Path(tokens[0]).name
         if executable != "cactus-prepare":
-            self._update_status("[red]请以 'cactus-prepare' 开头[/red]")
+            self._update_status("[red]Command must start with 'cactus-prepare'[/red]")
             return
         args = shlex.join(tokens[1:])
         self.exit(PromptResult(executable=tokens[0], args=args, action="submit"))
