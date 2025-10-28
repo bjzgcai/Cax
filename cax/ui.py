@@ -245,6 +245,7 @@ class PlanUIApp(App[UIResult]):
         Binding("s", "save_commands", "Save commands"),
         Binding("r", "run_plan", "Run"),
         Binding("q", "quit", "Quit"),
+        Binding("v", "toggle_verbose", "Toggle verbose"),
     ]
 
     def __init__(self, plan: Plan, base_dir: Optional[Path] = None):
@@ -347,6 +348,24 @@ class PlanUIApp(App[UIResult]):
 
     def action_quit(self) -> None:
         self.exit(UIResult(plan=self.plan, action="quit"))
+
+    def action_toggle_verbose(self) -> None:
+        self.plan.verbose = not self.plan.verbose
+        message = "Verbose logging enabled" if self.plan.verbose else "Verbose logging disabled"
+        if self.alignment_tree and self.tree_widget:
+            node = self._selected_alignment_node()
+            if node:
+                self._show_alignment_node(node, status=message)
+            elif self.detail_panel:
+                self.detail_panel.update(message)
+        elif self.round_list and self.round_items:
+            index = self.round_list.index or 0
+            if index < len(self.plan.rounds):
+                self._show_round(index, status=message)
+            elif self.detail_panel:
+                self.detail_panel.update(message)
+        elif self.detail_panel:
+            self.detail_panel.update(message)
 
     def action_edit_round(self) -> None:
         if self.alignment_tree and self.tree_widget:

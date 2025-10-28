@@ -35,6 +35,7 @@ def plan_overview(plan: Plan) -> str:
         )
 
     console.print(table)
+    console.print(f"Verbose logging: {'on' if plan.verbose else 'off'}")
     return buf.getvalue()
 
 

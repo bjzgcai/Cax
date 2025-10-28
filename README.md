@@ -31,6 +31,7 @@ cax
 ```
 
 - If you do not pass `--prepare-args` or `--from-file`, the program first prompts you for the full `cactus-prepare` command (for example `cactus-prepare examples/... --outDir ...`).
+- Before running the command, CAX checks whether the requested `--outDir` or `--jobStore` already exist and offers to delete them so the run can start from a clean slate.
 - After execution completes, the UI displays the parsed plan and lets you toggle RaMAx replacements before running or exporting.
 - Scripted usage is still supported:
   ```bash
@@ -50,6 +51,7 @@ cax
 - `S`: export all commands to `ramax_commands.txt` inside the chosen output directory.
 - `P`: refresh the overview table.
 - `Q`: quit the UI.
+- `V`: toggle verbose logging (when on, all command output is streamed to the console; off by default).
 
 When RaMAx is enabled for a round or subtree, execution stops on the first failure—it does not fall back to cactus `blast`/`align` automatically.
 

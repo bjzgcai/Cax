@@ -90,6 +90,7 @@ class Plan(BaseModel):
     out_dir: Optional[str] = None
     dry_run: bool = False
     global_ramax_opts: list[str] = Field(default_factory=list)
+    verbose: bool = False
 
     @field_validator("out_seq_file")
     @classmethod
