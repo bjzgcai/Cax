@@ -4,6 +4,7 @@ from __future__ import annotations
 import platform
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from typing import Optional
 
@@ -29,7 +30,17 @@ def executable_info(executable: str, version_args: list[str] | None = None) -> E
     if path and version_args is not None:
         try:
             result = subprocess.run([path, *version_args], check=False, capture_output=True, text=True)
-            version = result.stdout.strip() or result.stderr.strip() or None
+            version_output = result.stdout.strip() or result.stderr.strip() or None
+            if version_output:
+                cleaned_lines = []
+                for raw_line in version_output.splitlines():
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    if "failed to" in line.lower():
+                        continue
+                    cleaned_lines.append(line)
+                version = cleaned_lines[0] if cleaned_lines else None
         except OSError:
             version = None
     return ExecutableInfo(name=executable, path=path, version=version)
@@ -76,11 +87,61 @@ def environment_summary() -> dict[str, Optional[str]]:
     """Return a dictionary summarising key binaries and hardware."""
 
     ramax = executable_info("RaMAx", ["--version"])
-    cactus_prepare = executable_info("cactus-prepare", ["--version"])
+    cactus_exec = executable_info("cactus", ["--version"])
+    # 优先使用用户指定的命令获取 cactus 版本
+    cactus_version = detect_cactus_version() or (cactus_exec.version)
     return {
         "ramax_path": ramax.path,
         "ramax_version": ramax.version,
-        "cactus_prepare_path": cactus_prepare.path,
-        "cactus_prepare_version": cactus_prepare.version,
+        "cactus_path": cactus_exec.path,
+        "cactus_version": cactus_version,
         "gpu": detect_gpu_summary(),
     }
+
+
+def detect_cactus_version() -> Optional[str]:
+    """Return cactus version using: ``pip show cactus | grep -i ^Version``.
+
+    Falls back to ``python -m pip show cactus`` parsing when the pipeline isn't available.
+    """
+
+    # Pipeline per user instruction
+    try:
+        pipe_cmd = "pip show cactus | grep -i ^Version"
+        result = subprocess.run(
+            pipe_cmd,
+            shell=True,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0 and result.stdout:
+            for raw in result.stdout.splitlines():
+                line = raw.strip()
+                if not line:
+                    continue
+                if line.lower().startswith("version"):
+                    # Accept either "Version: x" or "version x"
+                    if ":" in line:
+                        return line.split(":", 1)[1].strip() or None
+                    parts = line.split()
+                    return parts[-1] if parts else None
+    except OSError:
+        pass
+
+    # Fallback without grep/pipes
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "show", "cactus"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            return None
+        for line in result.stdout.splitlines():
+            if line.lower().startswith("version:"):
+                return line.split(":", 1)[1].strip() or None
+    except OSError:
+        return None
+    return None

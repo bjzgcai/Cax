@@ -23,7 +23,6 @@ def _load_prepare_text(
 ) -> str:
     if prepare_args is not None:
         cmd = [executable, *shlex.split(prepare_args)]
-        typer.echo(f"[cax] running: {' '.join(cmd)}")
         result = subprocess.run(cmd, check=False, capture_output=True, text=True)
         if result.returncode != 0:
             typer.echo(result.stdout)
