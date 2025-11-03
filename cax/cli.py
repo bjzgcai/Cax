@@ -10,7 +10,7 @@ import typer
 from rich import print
 import shutil
 
-from . import command_prompt, parser, render, ui as ui_module
+from . import command_prompt, history, parser, render, ui as ui_module
 from .runner import PlanRunner
 
 app = typer.Typer(help="Cactus-RaMAx interactive tools (ui only)")
@@ -29,6 +29,7 @@ def _load_prepare_text(
             typer.echo(result.stderr, err=True)
             raise typer.Exit(code=result.returncode)
         output = result.stdout or ""
+        history.add_command(shlex.join(cmd))
         Path("steps-output").mkdir(exist_ok=True, parents=True)
         Path("steps-output/cax_prepare_debug.txt").write_text(output, encoding="utf-8")
         return output
