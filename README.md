@@ -1,6 +1,6 @@
 # Cactus-RaMAx
 
-Cactus-RaMAx helps you remix alignment plans emitted by `cactus-prepare`. You can inspect every round, toggle RaMAx for any subtree, and then run or export the resulting command list. Version `0.1.0` introduces a tree-based editor so that RaMAx can replace entire cactus subtrees instead of only individual rounds.
+Cactus-RaMAx helps you remix alignment plans emitted by `cactus-prepare`. You can inspect every round, toggle RaMAx for any subtree, and then run or export the resulting command list. Version `0.2.1` adds a Textual command prompt with an argument wizard, template chooser, and command history so first-time runs need fewer flags before you drop into the UI.
 
 ## Environment setup
 
@@ -30,8 +30,11 @@ Run the entry point directly:
 cax
 ```
 
-- If you do not pass `--prepare-args` or `--from-file`, the program first prompts you for the full `cactus-prepare` command (for example `cactus-prepare examples/... --outDir ...`).
-- Before running the command, CAX checks whether the requested `--outDir` or `--jobStore` already exist and offers to delete them so the run can start from a clean slate.
+- If you do not pass `--prepare-args` or `--from-file`, a Textual prompt opens so you can type or assemble a full `cactus-prepare` command.
+  - Press **F2** (or type `:wizard`) to open the argument wizard and fill `--outDir`, `--outSeqFile`, `--outHal`, and `--jobStore` one field at a time.
+  - Press **F3** (or type `:template`) to choose from Evolver examples bundled with the package or from your own `~/.cax/templates.json`.
+  - Press **F4** or type `!N` (for example `!1`) to recall the Nth entry from `~/.cax/history.json`. The prompt keeps the 20 most recent commands and lets you delete entries from the history window.
+- Before running `cactus-prepare`, CAX infers the effective output directory (from `--outDir` or the parent directory of `--outSeqFile`) and offers to delete existing `--outDir`/`--jobStore` paths so the run starts cleanly.
 - After execution completes, the UI displays the parsed plan and lets you toggle RaMAx replacements before running or exporting.
 - Scripted usage is still supported:
   ```bash
@@ -45,8 +48,8 @@ cax
 ### 2. Work inside the UI
 
 - The left pane renders the cactus progressive tree; press **Space** to toggle the selected subtree between cactus and RaMAx (use **Ctrl+Space** to expand or collapse nodes).
-- The details pane shows the current node, generated commands, and a subtree summary that counts how many rounds are using RaMAx.
-- `E`: edit commands for the selected round or RaMAx replacement.
+- The details pane now includes an environment summary card (RaMAx/cactus paths, versions, GPU, CPU, memory, disk) plus a compact plan overview table that adapts to narrow terminals.
+- `E`: edit commands for the selected round or RaMAx replacement in a multi-line editor (press **Ctrl+S** to save).
 - `R`: run the entire plan immediately.
 - `S`: export all commands to `ramax_commands.txt` inside the chosen output directory.
 - `P`: refresh the overview table.
@@ -55,10 +58,16 @@ cax
 
 When RaMAx is enabled for a round or subtree, execution stops on the first failure—it does not fall back to cactus `blast`/`align` automatically.
 
+### 3. Templates and history (optional)
+
+- Built-in templates are sourced from the packaged Evolver mammals/primates examples and any `.txt` files you add under `examples/`; user-defined templates live in `~/.cax/templates.json`.
+- Command history is stored at `~/.cax/history.json`. It deduplicates consecutive runs, keeps up to 20 entries, and syncs with the Textual prompt so you can reuse or delete past commands.
+
 ## Logging and troubleshooting
 
-- The raw output from `cactus-prepare` is stored at `steps-output/cax_prepare_debug.txt` (the path follows your `--outDir` if you change it).
+- The raw output from `cactus-prepare` is stored at `<out_dir>/cax_prepare_debug.txt`. If you only passed `--outSeqFile`, the parent directory of that file becomes the inferred output directory.
 - Runtime logs reuse the directories referenced by the original plan, for example `steps-output/logs/`.
+- Command history and templates live under `~/.cax/` so you can reuse them across projects or machines.
 
 ## Feedback
 
