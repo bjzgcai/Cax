@@ -88,7 +88,7 @@ def environment_summary() -> dict[str, Optional[str]]:
 
     ramax = executable_info("RaMAx", ["--version"])
     cactus_exec = executable_info("cactus", ["--version"])
-    # 优先使用用户指定的命令获取 cactus 版本
+    # Prefer user-specified commands when deriving the cactus version
     cactus_version = detect_cactus_version() or (cactus_exec.version)
     return {
         "ramax_path": ramax.path,

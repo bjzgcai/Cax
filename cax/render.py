@@ -14,7 +14,7 @@ from .models import Plan
 from .planner import PlannedCommand
 
 
-def plan_overview(plan: Plan) -> Panel:
+def plan_overview(plan: Plan, compact: bool = False) -> Panel:
     """Return a Rich Panel summarising the plan (auto-resizes in UI)."""
 
     table = Table(
@@ -23,20 +23,28 @@ def plan_overview(plan: Plan) -> Panel:
         header_style="bold magenta",
         expand=True,
     )
-    table.add_column("Round", overflow="fold")
-    table.add_column("Root", overflow="fold")
-    table.add_column("Target HAL", overflow="fold")
-    table.add_column("RaMAx?", overflow="fold")
-    table.add_column("Workdir", overflow="fold")
+    if compact:
+        table.add_column("Round", overflow="ellipsis", no_wrap=True, ratio=2)
+        table.add_column("Root", overflow="ellipsis", no_wrap=True, ratio=2)
+        table.add_column("Target HAL", overflow="ellipsis", no_wrap=True, ratio=3)
+        table.add_column("RaMAx?", overflow="ellipsis", no_wrap=True, ratio=1)
+    else:
+        table.add_column("Round", overflow="fold")
+        table.add_column("Root", overflow="fold")
+        table.add_column("Target HAL", overflow="fold")
+        table.add_column("RaMAx?", overflow="fold")
+        table.add_column("Workdir", overflow="fold")
 
     for round_entry in plan.rounds:
-        table.add_row(
+        row = [
             round_entry.name,
             round_entry.root,
             round_entry.target_hal,
             "yes" if round_entry.replace_with_ramax else "no",
-            round_entry.workdir or "",
-        )
+        ]
+        if not compact:
+            row.append(round_entry.workdir or "")
+        table.add_row(*row)
 
     footer = Text(f"Verbose logging: {'on' if plan.verbose else 'off'}", style="dim")
     content = Group(table, footer)
@@ -50,15 +58,15 @@ def environment_summary_card(
     """Return a Rich Panel that adapts to container width (no pre-rendering)."""
 
     def value_or_missing(value: Optional[str]) -> str:
-        return value if value else "未检测到"
+        return value if value else "Not detected"
 
     def oneline(value: Optional[str]) -> str:
         if not value:
-            return "未检测到"
+            return "Not detected"
         lines = value.splitlines()
         if not lines:
             return value
-        return lines[0] if len(lines) == 1 else f"{lines[0]} (＋{len(lines)-1} more)"
+        return lines[0] if len(lines) == 1 else f"{lines[0]} (+{len(lines)-1} more)"
 
     table = Table.grid(padding=(0, 1), expand=True)
     table.add_column(ratio=1)
@@ -69,16 +77,16 @@ def environment_summary_card(
         text.append(oneline(value))
         return text
 
-    table.add_row(entry("RaMAx 路径", environment.get("ramax_path")))
-    table.add_row(entry("RaMAx 版本", environment.get("ramax_version")))
-    table.add_row(entry("cactus 路径", environment.get("cactus_path")))
-    table.add_row(entry("cactus 版本", environment.get("cactus_version")))
+    table.add_row(entry("RaMAx path", environment.get("ramax_path")))
+    table.add_row(entry("RaMAx version", environment.get("ramax_version")))
+    table.add_row(entry("cactus path", environment.get("cactus_path")))
+    table.add_row(entry("cactus version", environment.get("cactus_version")))
     table.add_row(entry("GPU", environment.get("gpu")))
-    table.add_row(entry("CPU 核心数", resources.get("cpu_count")))
-    table.add_row(entry("内存 (GB)", resources.get("memory_gb")))
-    table.add_row(entry("磁盘可用 (GB)", resources.get("disk_free_gb")))
+    table.add_row(entry("CPU cores", resources.get("cpu_count")))
+    table.add_row(entry("Memory (GB)", resources.get("memory_gb")))
+    table.add_row(entry("Disk free (GB)", resources.get("disk_free_gb")))
 
-    panel = Panel(table, title="环境摘要", border_style="cyan", expand=True)
+    panel = Panel(table, title="Environment summary", border_style="cyan", expand=True)
     return panel
 
 

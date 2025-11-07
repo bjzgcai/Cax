@@ -30,8 +30,13 @@ def _load_prepare_text(
             raise typer.Exit(code=result.returncode)
         output = result.stdout or ""
         history.add_command(shlex.join(cmd))
-        Path("steps-output").mkdir(exist_ok=True, parents=True)
-        Path("steps-output/cax_prepare_debug.txt").write_text(output, encoding="utf-8")
+        tokens = cmd[1:]
+        out_dir_path = _discover_out_dir(tokens)
+        if out_dir_path is None:
+            out_dir_path = Path("steps-output")
+        out_dir_path.mkdir(exist_ok=True, parents=True)
+        debug_path = out_dir_path / "cax_prepare_debug.txt"
+        debug_path.write_text(output, encoding="utf-8")
         return output
     if from_file:
         return Path(from_file).read_text(encoding="utf-8")
@@ -90,11 +95,8 @@ def _prepare_plan_preview(
     if prepare_args is None:
         return None, None
     tokens = shlex.split(prepare_args)
-    out_dir = _extract_flag(tokens, "--outDir")
-    out_seq = _extract_flag(tokens, "--outSeqFile")
-    # If outDir not provided but outSeqFile is, derive from it.
-    if out_dir is None and out_seq:
-        out_dir = str(Path(out_seq).resolve().parent)
+    out_dir_path = _discover_out_dir(tokens)
+    out_dir = str(out_dir_path) if out_dir_path else None
     job_store = _extract_flag(tokens, "--jobStore") or _extract_flag(tokens, "--jobstore")
     # Some users may pass --jobStore=file:/path or jobstore=...; leave as-is for now.
     return out_dir, job_store
@@ -106,6 +108,23 @@ def _extract_flag(tokens: list[str], flag: str) -> Optional[str]:
             return tokens[idx + 1]
         if tok.startswith(flag + "="):
             return tok.split("=", 1)[1]
+    return None
+
+
+def _discover_out_dir(tokens: list[str]) -> Optional[Path]:
+    """Infer the output directory from cactus-prepare style tokens."""
+
+    out_dir = _extract_flag(tokens, "--outDir")
+    if out_dir:
+        return Path(out_dir).expanduser()
+    out_seq = _extract_flag(tokens, "--outSeqFile")
+    if out_seq:
+        seq_path = Path(out_seq).expanduser()
+        try:
+            parent = seq_path.resolve().parent
+        except OSError:
+            parent = seq_path.parent
+        return parent
     return None
 
 

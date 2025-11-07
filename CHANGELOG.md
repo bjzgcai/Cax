@@ -2,9 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
-# Changelog
+## [0.2.1] - 2025-11-07
 
-All notable changes to this project will be documented in this file.
+### Highlights
+- The Textual `cactus-prepare` prompt now features an argument wizard (F2 / `:wizard`), template chooser (F3 / `:template`), and history window (F4 / `!N`), guiding newcomers through common flags, bundling Evolver examples, and reusing the 20 most recent commands to shorten onboarding.
+- The CLI persists each command, infers the real output directory from `--outDir` or `--outSeqFile`, and writes `cax_prepare_debug.txt` into that directory so logs travel alongside their artifacts.
+
+### CLI & Prompt
+- Added inline shortcut hints plus `!N` history recall and the `:wizard`/`:template` quick commands, reducing re-typing and accidental edits.
+- The wizard separates the species tree, outputs, HAL target, job store, and extra arguments; the extra field honors `shlex` parsing, and defaults are inferred from the current command or a chosen template.
+- Before running `cactus-prepare`, the CLI records the exact command in `~/.cax/history.json` and emits debug output next to the inferred outputs (defaulting to `steps-output/`), keeping history, logs, and artifacts aligned.
+
+### Templates & Examples
+- Introduced a template manager that scans the packaged Evolver Newick samples together with user entries in `~/.cax/templates.json`, deduplicates them, and points defaults to `~/.cax/outputs/<stem>` so repeated runs do not collide.
+- Wheel builds now ship the Evolver example files, so templates work immediately after installation without manual copies.
+
+### History
+- Added a lightweight history store (max 20 entries) in `~/.cax/history.json`, including the ability to delete entries from the history window and reuse them across projects.
+
+### UI
+- Plan Overview supports a compact mode below 110 columns, hiding the environment card and tightening columns to avoid overflow, while environment summaries and RaMAx option dialogs now use English copy.
+- The command editor switched to a multi-line TextArea with `Ctrl+S` save support, making long commands easier to edit and presenting modal text in English for clarity.
+- The environment summary card condenses multi-line paths and versions into single-line snippets, uses English labels, and stays readable at any terminal width.
+
+### Other
+- `.gitignore` now ignores `*.pyc` to avoid accidentally committing Python bytecode.
 
 ## [0.2.0] - 2025-10-28
 

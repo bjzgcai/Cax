@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Iterable, List
 
-HISTORY_FILE = Path("steps-output/cax_history.json")
+HISTORY_FILE = Path.home() / ".cax" / "history.json"
 HISTORY_LIMIT = 20
 
 
@@ -55,3 +55,16 @@ def add_command(command: str) -> None:
         if entry.command != command:
             merged.append(entry.command)
     save_history(merged)
+
+
+def delete_entry(index: int) -> bool:
+    """Delete a history entry by its zero-based index."""
+
+    if index < 0:
+        return False
+    entries = load_history()
+    if index >= len(entries):
+        return False
+    del entries[index]
+    save_history(entry.command for entry in entries)
+    return True

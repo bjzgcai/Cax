@@ -5,12 +5,17 @@ from dataclasses import dataclass
 from pathlib import Path
 import shlex
 from typing import Literal
+from textwrap import dedent
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.containers import Container
 from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Input, ListItem, ListView, Static
+from textual.scroll_view import ScrollView
 
+from rich.console import Group
+from rich.text import Text
 from . import history, templates
 
 
@@ -30,6 +35,15 @@ class PrepareWizard(Screen[str | None]):
         Binding("escape", "cancel", "Back"),
     ]
 
+    FIELD_DEFINITIONS = [
+        ("spec", "Species/plan file", "examples/evolverMammals.txt"),
+        ("out_dir", "--outDir", str(templates.default_output_dir("run"))),
+        ("out_seq", "--outSeqFile", "steps-output/out.txt"),
+        ("out_hal", "--outHal", "steps-output/out.hal"),
+        ("job_store", "--jobStore", "jobstore"),
+        ("extra", "Extra arguments", "--maxCores 32"),
+    ]
+
     def __init__(self, defaults: dict[str, str] | None = None) -> None:
         super().__init__()
         self._status: Static | None = None
@@ -37,69 +51,91 @@ class PrepareWizard(Screen[str | None]):
         self._defaults = defaults or {}
 
     def compose(self) -> ComposeResult:
-        yield Header()
-        yield Static("Fill out the fields below and press “Generate command” to return.", id="instructions")
-        for field_id, label, placeholder in [
-            ("spec", "Spec or plan file", "examples/evolverMammals.txt"),
-            ("out_dir", "--outDir", "steps-output"),
-            ("out_seq", "--outSeqFile", "steps-output/out.txt"),
-            ("out_hal", "--outHal", "steps-output/out.hal"),
-            ("job_store", "--jobStore", "jobstore"),
-            ("extra", "Additional arguments", "--optionA foo --optionB"),
-        ]:
-            value = self._defaults.get(field_id, "")
-            input_widget = Input(value=value, placeholder=placeholder, id=field_id)
-            self._fields[field_id] = input_widget
-            yield Static(label)
-            yield input_widget
-        self._status = Static("", id="status")
-        yield Button("Generate command", id="submit", variant="success")
-        yield Button("Cancel", id="cancel")
-        yield self._status
+        yield Header(show_clock=True)
+        with Container(id="wizard-layout"):
+            scroll = ScrollView(id="wizard-scroll", can_focus=False, can_focus_children=True)
+            scroll.show_horizontal_scrollbar = False
+            with scroll:
+                instructions = Text.from_markup(
+                    "[bold cyan]Fill in the fields below to build a cactus-prepare command.[/]\n"
+                    "Fields left empty won't be added to the command. Click the buttons below when you're done."
+                )
+                yield Static(instructions, id="wizard-instructions")
+                for field_id, label, placeholder in self.FIELD_DEFINITIONS:
+                    value = self._defaults.get(field_id, "")
+                    input_widget = Input(
+                        value=value,
+                        placeholder=placeholder,
+                        id=f"wizard-{field_id}",
+                    )
+                    self._fields[field_id] = input_widget
+                    yield Static(label, classes="wizard-label")
+                    yield input_widget
+            with Container(id="wizard-actions"):
+                yield Button("Generate command", id="submit", variant="success")
+                yield Button("Cancel", id="cancel")
+            status = Static("", id="wizard-status")
+            self._status = status
+            yield status
         yield Footer()
+
+    def on_mount(self) -> None:  # type: ignore[override]
+        spec_input = self._fields.get("spec")
+        if spec_input:
+            spec_input.focus()
 
     def action_cancel(self) -> None:
         self.dismiss(None)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:  # type: ignore[override]
         if event.button.id == "cancel":
-            self.dismiss(None)
+            self.action_cancel()
             return
-        if event.button.id != "submit":
-            return
-        spec = self._fields["spec"].value.strip()
-        if not spec:
-            self._set_status("[red]Spec or plan file cannot be empty[/red]")
-            return
-        spec_path = Path(spec)
-        if not spec_path.exists():
-            self._set_status("[red]Specified plan file does not exist[/red]")
-            return
-        command = ["cactus-prepare", spec]
-        out_dir = self._fields["out_dir"].value.strip()
-        if out_dir:
-            command.extend(["--outDir", out_dir])
-        out_seq = self._fields["out_seq"].value.strip()
-        if out_seq:
-            command.extend(["--outSeqFile", out_seq])
-        out_hal = self._fields["out_hal"].value.strip()
-        if out_hal:
-            command.extend(["--outHal", out_hal])
-        job_store = self._fields["job_store"].value.strip()
-        if job_store:
-            command.extend(["--jobStore", job_store])
+        if event.button.id == "submit":
+            self._submit()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:  # type: ignore[override]
+        event.stop()
+        self._submit()
+
+    def _submit(self) -> None:
+        command = self._build_command()
+        if command:
+            self.dismiss(command)
+
+    def _build_command(self) -> str | None:
+        spec = self._fields.get("spec")
+        if not spec or not spec.value.strip():
+            self._update_status("[red]A species/plan file path is required[/red]")
+            return None
+        tokens: list[str] = ["cactus-prepare", spec.value.strip()]
+        mapping = [
+            ("out_dir", "--outDir"),
+            ("out_seq", "--outSeqFile"),
+            ("out_hal", "--outHal"),
+            ("job_store", "--jobStore"),
+        ]
+        for field_id, flag in mapping:
+            value = self._fields[field_id].value.strip()
+            if value:
+                tokens.extend([flag, value])
         extra = self._fields["extra"].value.strip()
         if extra:
-            command.extend(shlex.split(extra))
-        self.dismiss(shlex.join(command))
+            try:
+                tokens.extend(shlex.split(extra))
+            except ValueError as exc:
+                self._update_status(f"[red]Failed to parse extra arguments: {exc}[/red]")
+                return None
+        self._update_status("[green]Command generated. Confirm to return to the main view.[/green]")
+        return shlex.join(tokens)
 
-    def _set_status(self, message: str) -> None:
+    def _update_status(self, message: str) -> None:
         if self._status:
             self._status.update(message)
 
 
 class TemplateSelector(Screen[templates.Template | None]):
-    """Simple list view that lets the user pick a template."""
+    """Simple screen that lists templates and returns the chosen one."""
 
     BINDINGS = [
         Binding("escape", "cancel", "Back"),
@@ -111,62 +147,179 @@ class TemplateSelector(Screen[templates.Template | None]):
         self._list_view: ListView | None = None
 
     def compose(self) -> ComposeResult:
-        yield Header()
-        if not self._templates:
-            yield Static("No templates available.", id="instructions")
-        else:
-            yield Static("Use the arrow keys to choose a template, then press Enter.", id="instructions")
-            items: list[ListItem] = []
-            for idx, template in enumerate(self._templates):
-                description = f"{template.name}\n{template.spec}"
-                item = ListItem(Static(description), id=f"template-{idx}")
-                items.append(item)
+        yield Header(show_clock=True)
+        with Container(id="template-layout"):
+            title = Text.from_markup("[bold cyan]Choose a template[/]")
+            yield Static(title, id="template-title")
+            items = []
+            for template in self._templates:
+                text = Text.assemble((template.name, "bold"), "\n", (template.spec, "dim"))
+                items.append(ListItem(Static(text), name=template.name))
             list_view = ListView(*items, id="template-list")
             self._list_view = list_view
             yield list_view
         yield Footer()
 
+    def on_mount(self) -> None:  # type: ignore[override]
+        if self._list_view:
+            self._list_view.focus()
+
     def action_cancel(self) -> None:
         self.dismiss(None)
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:  # type: ignore[override]
-        if not event.item.id:
-            return
-        if not event.item.id.startswith("template-"):
-            return
-        try:
-            index = int(event.item.id.split("-", 1)[1])
-        except ValueError:
-            return
-        if index < 0 or index >= len(self._templates):
-            return
-        self.dismiss(self._templates[index])
+        event.stop()
+        template = self._templates[event.index] if 0 <= event.index < len(self._templates) else None
+        self.dismiss(template)
+
+
+class HistoryViewer(Screen[str | None]):
+    """Full-screen history viewer that returns the selected command."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Back"),
+        Binding("delete", "delete_entry", "Delete"),
+        Binding("d", "delete_entry", "Delete"),
+    ]
+
+    def __init__(self, entries: list[history.HistoryEntry]) -> None:
+        super().__init__()
+        self._entries = entries
+        self._list_view: ListView | None = None
+        self._content_container: Container | None = None
+        self._status: Static | None = None
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=True)
+        with Container(id="history-layout"):
+            instructions = Text.from_markup(
+                dedent(
+                    """
+                    [bold cyan]History[/]
+                    • Use the arrow keys or PgUp/PgDn to scroll
+                    • Press Enter to copy the selected command into the main view
+                    • Press [bold magenta]D[/] or [bold magenta]Delete[/] to remove the selected command
+                    • Press Esc to go back
+                    """
+                ).strip()
+            )
+            yield Static(instructions, id="history-instructions")
+            content = Container(*self._build_history_content(), id="history-content")
+            self._content_container = content
+            yield content
+            status = Static("", id="history-status")
+            self._status = status
+            yield status
+        yield Footer()
 
     def on_mount(self) -> None:  # type: ignore[override]
         if self._list_view:
-            self._list_view.index = 0
+            self._list_view.focus()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:  # type: ignore[override]
+        event.stop()
+        if 0 <= event.index < len(self._entries):
+            command = self._entries[event.index].command
+            self.dismiss(command)
+        else:
+            self.dismiss(None)
+
+    async def action_delete_entry(self) -> None:
+        if not self._entries:
+            self._update_status("[yellow]No entries to delete[/yellow]")
+            return
+        if not self._list_view or self._list_view.index is None:
+            self._update_status("[yellow]Select a command to delete first[/yellow]")
+            return
+        index = self._list_view.index
+        if not history.delete_entry(index):
+            self._update_status("[red]Delete failed, please try again[/red]")
+            return
+        del self._entries[index]
+        await self._refresh_history_content()
+        if self._entries:
+            self._update_status(f"[green]Deleted history command #{index + 1}[/green]")
+        else:
+            self._update_status("[green]History cleared[/green]")
+
+    def _build_history_content(self) -> list[Static | ListView]:
+        self._list_view = None
+        if not self._entries:
+            empty = Text.from_markup(
+                "[dim]No history yet. After you run cactus-prepare, the latest commands will appear here.[/]"
+            )
+            return [Static(empty, id="history-empty")]
+        items = []
+        for idx, entry in enumerate(self._entries, start=1):
+            text = Text.from_markup(f"[bold cyan]#{idx}[/] {entry.command}")
+            items.append(ListItem(Static(text), name=str(idx)))
+        list_view = ListView(*items, id="history-list")
+        self._list_view = list_view
+        return [list_view]
+
+    async def _refresh_history_content(self) -> None:
+        if not self._content_container:
+            return
+        await self._content_container.remove_children()
+        for widget in self._build_history_content():
+            await self._content_container.mount(widget)
+        if self._list_view:
+            self._list_view.focus()
+
+    def _update_status(self, message: str) -> None:
+        if self._status:
+            self._status.update(message)
 
 
 class PrepareCommandPrompt(App[PromptResult]):
     """Minimal Textual app that requests a cactus-prepare command."""
 
     CSS = """
-    Screen {
+    Screen { layout: vertical; min-height: 0; }
+    #prepare-layout { layout: vertical; padding: 1 2; min-height: 0; width: 1fr; }
+    #content { layout: vertical; padding-bottom: 2; width: 1fr; height: 1fr; min-height: 0; }
+    #instructions-panel { layout: vertical; width: 1fr; min-height: 0; }
+    #instructions-title { padding-bottom: 1; }
+    .instructions-block { padding-bottom: 1; }
+    .instructions-block:last-child { padding-bottom: 0; }
+    #prepare-bottom { layout: vertical; padding: 1 2; width: 1fr; height: auto; min-height: 0; }
+    #command-title { color: $accent; }
+    #command { margin: 1 0; }
+    #status { padding: 0 0 1 0; }
+
+    /* Wizard screen */
+    #wizard-layout {
         layout: vertical;
-    }
-    #instructions {
+        height: 1fr;
         padding: 1 2;
+        min-height: 0;
     }
-    #history {
-        padding: 0 2;
-        color: #b3b3b3;
+    #wizard-scroll {
+        height: 1fr;
+        padding: 0 1;
+        min-height: 0;
     }
-    #command {
-        margin: 1 2;
-    }
-    #status {
-        padding: 0 2 1 2;
-    }
+    .wizard-label { padding-top: 1; }
+    .wizard-label:first-of-type { padding-top: 0; }
+    #wizard-actions { layout: horizontal; padding: 1 0; }
+    #wizard-actions Button { margin-right: 1; }
+    #wizard-actions Button:last-child { margin-right: 0; }
+    #wizard-status { padding: 0 0 1 0; }
+
+    /* Template selection */
+    #template-layout { layout: vertical; height: 1fr; padding: 1 2; min-height: 0; }
+    #template-title { padding-bottom: 1; }
+    #template-list { height: 1fr; min-height: 0; }
+
+    /* History view */
+    #history-layout { layout: vertical; height: 1fr; padding: 1 2; min-height: 0; }
+    #history-instructions { padding-bottom: 1; }
+    #history-content { height: 1fr; min-height: 0; }
+    #history-list { height: 1fr; min-height: 0; }
+    #history-status { padding-top: 1; }
     """
 
     BINDINGS = [
@@ -176,38 +329,65 @@ class PrepareCommandPrompt(App[PromptResult]):
         Binding("f3", "choose_template", "Templates"),
         Binding("ctrl+shift+w", "open_wizard", "Wizard"),
         Binding("ctrl+shift+t", "choose_template", "Templates"),
+        Binding("f4", "show_history", "History"),
+        Binding("ctrl+shift+h", "show_history", "History"),
     ]
 
     def __init__(self) -> None:
         super().__init__()
         self._command_input: Input | None = None
         self._status: Static | None = None
-        self._history_text: Static | None = None
         self._history_entries = history.load_history()
         self._templates = templates.load_templates()
         self._template_defaults: dict[str, str] | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
-        instructions = (
-            "Enter a full cactus-prepare command and press Enter to submit. "
-            "To reuse history, type `!N` (for example `!1`) and press Enter to load, then press Enter again to submit. "
-            "Press F2 or Ctrl+Shift+W to open the argument wizard, F3 or Ctrl+Shift+T to pick a template, "
-            "or type `:wizard` / `:template` directly in the prompt."
-        )
-        yield Static(instructions, id="instructions")
-        history_widget = Static(self._render_history(), id="history")
-        self._history_text = history_widget
-        yield history_widget
-        command_input = Input(placeholder="cactus-prepare …", id="command")
-        self._command_input = command_input
-        yield command_input
-        status = Static("", id="status")
-        self._status = status
-        yield status
+        with Container(id="prepare-layout"):
+            with Container(id="content"):
+                with Container(id="instructions-panel"):
+                    instructions_title = Text.from_markup("[bold cyan]Preparation[/]")
+                    yield Static(instructions_title, id="instructions-title")
+                    instructions_sections = [
+                        Text.from_markup(
+                            dedent(
+                                """
+                                [bold underline]Shortcuts[/]
+                                • [bold magenta]F2[/] / [bold magenta]Ctrl+Shift+W[/] open the argument wizard
+                                • [bold magenta]F3[/] / [bold magenta]Ctrl+Shift+T[/] choose a template
+                                • [bold magenta]F4[/] / [bold magenta]Ctrl+Shift+H[/] view command history
+                                • [bold magenta]Esc[/] / [bold magenta]Ctrl+C[/] exit this prompt
+                                """
+                            ).strip()
+                        ),
+                        Text.from_markup(
+                            dedent(
+                                """
+                                [bold underline]Command entry[/]
+                                • Enter a full `cactus-prepare` command and press Enter to submit it
+                                • Type `[reverse]!N[/]` (for example `[reverse]!1[/]`) to load a history entry
+                                • Type `[bold magenta]:wizard[/]` to open the argument wizard, or `[bold magenta]:template[/]` to open the template list
+                                • The history window keeps the 20 most recent commands
+                                """
+                            ).strip()
+                        ),
+                    ]
+                    for section in instructions_sections:
+                        yield Static(section, classes="instructions-block")
+
+            with Container(id="prepare-bottom"):
+                command_title = Text.from_markup("[bold]Enter a cactus-prepare command[/]")
+                yield Static(command_title, id="command-title")
+                command_input = Input(placeholder="cactus-prepare …", id="command")
+                self._command_input = command_input
+                yield command_input
+                status = Static("", id="status")
+                self._status = status
+                yield status
         yield Footer()
 
     def on_mount(self) -> None:  # type: ignore[override]
+        self._refresh_history()
         if self._command_input:
             if self._history_entries:
                 self._command_input.value = self._history_entries[0].command
@@ -270,19 +450,20 @@ class PrepareCommandPrompt(App[PromptResult]):
             return
         self.push_screen(TemplateSelector(self._templates), self._template_chosen)
 
+    def action_show_history(self) -> None:
+        self._refresh_history()
+        if not self._history_entries:
+            self._update_status("[yellow]No history available yet[/yellow]")
+            return
+        self.push_screen(HistoryViewer(self._history_entries), self._history_selected)
+
     def _update_status(self, message: str) -> None:
         if self._status:
             self._status.update(message)
 
-    def _render_history(self) -> str:
-        if not self._history_entries:
-            return "No history yet."
-        lines: list[str] = ["Recent history:"]
-        for idx, entry in enumerate(self._history_entries[:5], start=1):
-            lines.append(f"{idx}. {entry.command}")
-        if len(self._history_entries) > 5:
-            lines.append("…")
-        return "\n".join(lines)
+    def _refresh_history(self) -> None:
+        self._history_entries = history.load_history()
+
 
     def _wizard_finished(self, result: str | None) -> None:
         if not result:
@@ -302,6 +483,15 @@ class PrepareCommandPrompt(App[PromptResult]):
             self._command_input.value = command
         self._template_defaults = template.to_wizard_defaults()
         self._update_status(f"[green]Applied template: {template.name}[/green]")
+
+    def _history_selected(self, command: str | None) -> None:
+        if not command:
+            self._update_status("[yellow]History window closed[/yellow]")
+            return
+        if self._command_input:
+            self._command_input.value = command
+            self._command_input.cursor_position = len(command)
+        self._update_status("[green]History command loaded. Press Enter to submit.[/green]")
 
     def _suggest_defaults(self) -> dict[str, str]:
         defaults: dict[str, str] = {}

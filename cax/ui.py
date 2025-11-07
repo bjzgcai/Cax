@@ -8,8 +8,9 @@ from typing import Optional
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container
+from textual.geometry import Size
 from textual.screen import ModalScreen
-from textual.widgets import Button, Footer, Header, Input, ListItem, ListView, Static, Tree
+from textual.widgets import Button, Footer, Header, Input, ListItem, ListView, Static, Tree, TextArea
 
 from rich.text import Text
 
@@ -103,7 +104,6 @@ class CommandEditModal(ModalScreen[str | None]):
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),
         Binding("ctrl+s", "save", "Save"),
-        Binding("enter", "save", "Save"),
     ]
 
     CSS = """
@@ -140,15 +140,16 @@ class CommandEditModal(ModalScreen[str | None]):
         super().__init__()
         self.title = title
         self.initial_command = initial_command
-        self._input: Input | None = None
+        self._editor: TextArea | None = None
         self._status: Static | None = None
 
     def compose(self) -> ComposeResult:
         with Container(id="editor-dialog"):
             yield Static(self.title, id="editor-title")
-            input_widget = Input(value=self.initial_command, id="editor-command")
-            self._input = input_widget
-            yield input_widget
+            editor = TextArea(id="editor-command")
+            editor.text = self.initial_command
+            self._editor = editor
+            yield editor
             status = Static("", id="editor-status")
             self._status = status
             yield status
@@ -157,18 +158,14 @@ class CommandEditModal(ModalScreen[str | None]):
                 yield Button("Cancel", id="cancel")
 
     def on_mount(self) -> None:
-        if self._input:
-            self._input.focus()
-            self._input.cursor_position = len(self._input.value)
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        self.action_save()
+        if self._editor:
+            self._editor.focus()
 
     def action_save(self) -> None:
-        if not self._input:
+        if not self._editor:
             self.dismiss(None)
             return
-        value = self._input.value.strip()
+        value = self._editor.text.strip()
         if not value:
             if self._status:
                 self._status.update("Command cannot be empty")
@@ -189,9 +186,9 @@ class RamaxOptionsModal(ModalScreen[tuple[list[str], list[str]] | None]):
     """Modal dialog for editing global and per-round RaMAx options."""
 
     BINDINGS = [
-        Binding("escape", "cancel", "取消"),
-        Binding("ctrl+s", "save", "保存"),
-        Binding("enter", "save", "保存"),
+        Binding("escape", "cancel", "Cancel"),
+        Binding("ctrl+s", "save", "Save"),
+        Binding("enter", "save", "Save"),
     ]
 
     CSS = """
@@ -252,27 +249,27 @@ class RamaxOptionsModal(ModalScreen[tuple[list[str], list[str]] | None]):
 
     def compose(self) -> ComposeResult:
         with Container(id="options-dialog"):
-            yield Static("编辑 RaMAx 选项", id="options-title")
-            yield Static("全局选项 (plan.global_ramax_opts)", classes="section-label")
+            yield Static("Edit RaMAx options", id="options-title")
+            yield Static("Global options (plan.global_ramax_opts)", classes="section-label")
             global_container = Container(id="global-options", classes="options-list")
             self._global_container = global_container
             yield global_container
             with Container(id="global-buttons", classes="button-row"):
-                yield Button("追加全局选项", id="add-global", variant="success")
-                yield Button("删除最后全局", id="remove-global", variant="warning")
-            yield Static("当前 Round 选项 (round.ramax_opts)", classes="section-label")
+                yield Button("Add global option", id="add-global", variant="success")
+                yield Button("Remove last global", id="remove-global", variant="warning")
+            yield Static("Current Round options (round.ramax_opts)", classes="section-label")
             round_container = Container(id="round-options", classes="options-list")
             self._round_container = round_container
             yield round_container
             with Container(id="round-buttons", classes="button-row"):
-                yield Button("追加 Round 选项", id="add-round", variant="success")
-                yield Button("删除最后 Round", id="remove-round", variant="warning")
+                yield Button("Add Round option", id="add-round", variant="success")
+                yield Button("Remove last Round", id="remove-round", variant="warning")
             status = Static("", id="options-status")
             self._status = status
             yield status
             with Container(id="options-buttons"):
-                yield Button("保存", id="save-options", variant="success")
-                yield Button("取消", id="cancel-options")
+                yield Button("Save", id="save-options", variant="success")
+                yield Button("Cancel", id="cancel-options")
 
     def on_mount(self) -> None:
         self._refresh_inputs()
@@ -283,23 +280,23 @@ class RamaxOptionsModal(ModalScreen[tuple[list[str], list[str]] | None]):
                 child.remove()
             if self._global_values:
                 inputs = [
-                    Input(value=value, placeholder="例如 --threads=8", classes="option-input", id=f"global-{idx}")
+                    Input(value=value, placeholder="e.g. --threads=8", classes="option-input", id=f"global-{idx}")
                     for idx, value in enumerate(self._global_values)
                 ]
                 self._global_container.mount(*inputs)
             else:
-                self._global_container.mount(Static("（无全局选项）", classes="option-empty"))
+                self._global_container.mount(Static("(no global options)", classes="option-empty"))
         if self._round_container:
             for child in list(self._round_container.children):
                 child.remove()
             if self._round_values:
                 inputs = [
-                    Input(value=value, placeholder="例如 --input {}", classes="option-input", id=f"round-{idx}")
+                    Input(value=value, placeholder="e.g. --input {}", classes="option-input", id=f"round-{idx}")
                     for idx, value in enumerate(self._round_values)
                 ]
                 self._round_container.mount(*inputs)
             else:
-                self._round_container.mount(Static("（无 Round 选项）", classes="option-empty"))
+                self._round_container.mount(Static("(no Round options)", classes="option-empty"))
 
     def _sync_from_inputs(self) -> None:
         if self._global_container:
@@ -388,12 +385,21 @@ class PlanUIApp(App[UIResult]):
     CSS = """
     Screen {
         layout: vertical;
+        min-height: 0;
     }
     #main {
         layout: horizontal;
+        width: 100%;
+        height: 1fr;
+        min-height: 0;
+    }
+    #main > * {
+        min-width: 0;
+        min-height: 0;
     }
     #rounds {
         width: 45%;
+        min-width: 32;
         height: 1fr;
     }
     #details {
@@ -401,6 +407,9 @@ class PlanUIApp(App[UIResult]):
         padding: 1 2;
         overflow-y: auto;
         layout: vertical;
+        height: 1fr;
+        min-width: 0;
+        min-height: 0;
     }
     #environment-summary {
         width: 100%;
@@ -409,6 +418,8 @@ class PlanUIApp(App[UIResult]):
         width: 100%;
         margin-top: 1;
     }
+    /* TextArea size within the edit modal */
+    #editor-command { height: 10; }
     """
 
     BINDINGS = [
@@ -430,6 +441,7 @@ class PlanUIApp(App[UIResult]):
         self.round_items: list[RoundListItem] = []
         self.round_list: ListView | None = None
         self.detail_panel: Static | None = None
+        self._environment_card: Static | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -460,22 +472,34 @@ class PlanUIApp(App[UIResult]):
                 ),
                 id="environment-summary",
             )
+            self._environment_card = environment_card
             with Container(id="details"):
                 yield environment_card
-                detail = Static(render.plan_overview(self.plan), id="plan-overview")
+                detail = Static(
+                    render.plan_overview(self.plan, compact=self._is_compact()),
+                    id="plan-overview",
+                )
                 self.detail_panel = detail
                 yield detail
         yield Footer()
 
     def on_mount(self) -> None:
         if self.tree_widget and self.alignment_tree:
-            self.tree_widget.root.expand_all()
+            if self.size.width > 120:
+                self.tree_widget.root.expand_all()
             self.tree_widget.move_cursor(self.tree_widget.root, animate=False)
             self.set_focus(self.tree_widget)
             self._show_alignment_node(self.alignment_tree.root)
         elif self.round_list and self.round_items:
             self.round_list.index = 0
             self._show_round(0)
+        self._apply_env_visibility()
+
+    def watch_size(self, size: Size) -> None:  # type: ignore[override]
+        self._apply_env_visibility()
+
+    def _is_compact(self) -> bool:
+        return self.size.width <= 110
 
     def action_toggle_round(self) -> None:
         if self.alignment_tree and self.tree_widget:
@@ -512,7 +536,7 @@ class PlanUIApp(App[UIResult]):
 
     def action_preview_plan(self) -> None:
         if self.detail_panel:
-            preview = render.plan_overview(self.plan)
+            preview = render.plan_overview(self.plan, compact=self._is_compact())
             self.detail_panel.update(preview)
 
     def action_run_plan(self) -> None:
@@ -548,6 +572,11 @@ class PlanUIApp(App[UIResult]):
                 self.detail_panel.update(message)
         elif self.detail_panel:
             self.detail_panel.update(message)
+
+    def _apply_env_visibility(self) -> None:
+        if not self._environment_card:
+            return
+        self._environment_card.display = self.size.width > 110
 
     def action_edit_round(self) -> None:
         if self.alignment_tree and self.tree_widget:
@@ -626,18 +655,18 @@ class PlanUIApp(App[UIResult]):
             details.append("[magenta]hal2fasta[/magenta]")
             details.extend(step.raw for step in round_entry.hal2fasta_steps)
         details.append("")
-        details.append("[yellow]RaMAx 选项[/yellow]")
-        details.append(f"全局: {self._format_option_list(self.plan.global_ramax_opts)}")
+        details.append("[yellow]RaMAx options[/yellow]")
+        details.append(f"Global: {self._format_option_list(self.plan.global_ramax_opts)}")
         details.append(f"Round: {self._format_option_list(round_entry.ramax_opts)}")
         return details
 
     def _format_option_list(self, options: list[str]) -> str:
-        return ", ".join(options) if options else "（空）"
+        return ", ".join(options) if options else "(empty)"
 
     def _ramax_options_summary(self, round_entry: Round) -> str:
         global_summary = self._format_option_list(self.plan.global_ramax_opts)
         round_summary = self._format_option_list(round_entry.ramax_opts)
-        return f"全局: {global_summary}\nRound: {round_summary}"
+        return f"Global: {global_summary}\nRound: {round_summary}"
 
     def _show_round(self, index: int, status: str | None = None) -> None:
         if not self.detail_panel or index >= len(self.plan.rounds):
@@ -652,7 +681,7 @@ class PlanUIApp(App[UIResult]):
         targets: list[CommandTarget] = [
             CommandTarget(
                 key="ramax-options",
-                label="RaMAx 选项",
+                label="RaMAx options",
                 command=self._ramax_options_summary(round_entry),
                 kind="ramax-options",
             )
@@ -850,7 +879,7 @@ class PlanUIApp(App[UIResult]):
         self.plan.global_ramax_opts = global_opts
         round_entry = self.plan.rounds[round_index]
         round_entry.ramax_opts = round_opts
-        status = "已更新 RaMAx 选项"
+        status = "RaMAx options updated"
         if self.alignment_tree and self.tree_widget:
             node = self._find_node_for_round(round_entry)
             if node:

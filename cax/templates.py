@@ -6,8 +6,10 @@ import json
 from pathlib import Path
 import shlex
 
-TEMPLATE_FILE = Path("steps-output/cax_templates.json")
+TEMPLATE_FILE = Path.home() / ".cax" / "templates.json"
+PACKAGE_EXAMPLE_DIR = Path(__file__).resolve().parent / "examples"
 EXAMPLE_DIR = Path("examples")
+EXAMPLE_DIRS = (PACKAGE_EXAMPLE_DIR, EXAMPLE_DIR)
 FLAG_MAP = {
     "out_dir": "--outDir",
     "out_seq": "--outSeqFile",
@@ -54,25 +56,50 @@ def load_templates() -> list[Template]:
 
 def _load_builtin_templates() -> list[Template]:
     templates: list[Template] = []
-    if not EXAMPLE_DIR.exists():
-        return templates
-    for path in sorted(EXAMPLE_DIR.glob("*.txt")):
-        stem = path.stem
-        params = {
-            "out_dir": "steps-output",
-            "out_seq": f"steps-output/{stem}.txt",
-            "out_hal": f"steps-output/{stem}.hal",
-            "job_store": "jobstore",
-        }
-        templates.append(
-            Template(
-                name=f"Example: {stem}",
-                spec=str(path),
-                params=params,
-                source="builtin",
-            )
-        )
+    seen: set[str] = set()
+    for base_dir in EXAMPLE_DIRS:
+        if not base_dir.exists():
+            continue
+        for path in sorted(base_dir.glob("*.txt")):
+            if path.name in seen:
+                continue
+            seen.add(path.name)
+            template = _template_from_example(path)
+            if template is not None:
+                templates.append(template)
     return templates
+
+
+def _template_from_example(path: Path) -> Template | None:
+    try:
+        with path.open(encoding="utf-8") as handle:
+            first_line = next((line.strip() for line in handle if line.strip()), "")
+    except OSError:
+        return None
+    if not _looks_like_newick(first_line):
+        return None
+    stem = path.stem
+    default_out_dir_path = default_output_dir(stem)
+    params = {
+        "out_dir": str(default_out_dir_path),
+        "out_seq": str(default_out_dir_path / f"{stem}.txt"),
+        "out_hal": str(default_out_dir_path / f"{stem}.hal"),
+        "job_store": "jobstore",
+    }
+    return Template(
+        name=f"Example: {stem}",
+        spec=str(path),
+        params=params,
+        source="builtin",
+    )
+
+
+def _looks_like_newick(line: str) -> bool:
+    if not line:
+        return False
+    if line.endswith(";") and "(" in line:
+        return True
+    return False
 
 
 def _load_user_templates() -> list[Template]:
@@ -96,3 +123,10 @@ def _load_user_templates() -> list[Template]:
         clean_params = {k: str(v) for k, v in params.items() if k in FLAG_MAP}
         templates.append(Template(name=name, spec=spec, params=clean_params, source="user"))
     return templates
+
+
+def default_output_dir(stem: str | None = None) -> Path:
+    base = Path.home() / ".cax" / "outputs"
+    if stem:
+        return base / stem
+    return base

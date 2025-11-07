@@ -30,7 +30,7 @@ python_files = ["test_*.py"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["cax"]
+include = ["cax/examples/*.txt"]
 
 [tool.hatch.build.targets.sdist]
 include = ["cax", "examples", "tests", "README.md", "pyproject.toml"]
-
