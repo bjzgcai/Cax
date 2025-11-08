@@ -9,10 +9,11 @@ from textwrap import dedent
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container
+from textual.containers import Container, VerticalScroll
+from textual.events import Resize
+from textual.geometry import Size
 from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Input, ListItem, ListView, Static
-from textual.scroll_view import ScrollView
 
 from rich.console import Group
 from rich.text import Text
@@ -49,40 +50,45 @@ class PrepareWizard(Screen[str | None]):
         self._status: Static | None = None
         self._fields: dict[str, Input] = {}
         self._defaults = defaults or {}
+        self._instructions: Static | None = None
+        self._is_compact: bool | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with Container(id="wizard-layout"):
-            scroll = ScrollView(id="wizard-scroll", can_focus=False, can_focus_children=True)
-            scroll.show_horizontal_scrollbar = False
-            with scroll:
-                instructions = Text.from_markup(
-                    "[bold cyan]Fill in the fields below to build a cactus-prepare command.[/]\n"
-                    "Fields left empty won't be added to the command. Click the buttons below when you're done."
-                )
-                yield Static(instructions, id="wizard-instructions")
-                for field_id, label, placeholder in self.FIELD_DEFINITIONS:
-                    value = self._defaults.get(field_id, "")
-                    input_widget = Input(
-                        value=value,
-                        placeholder=placeholder,
-                        id=f"wizard-{field_id}",
-                    )
-                    self._fields[field_id] = input_widget
-                    yield Static(label, classes="wizard-label")
-                    yield input_widget
-            with Container(id="wizard-actions"):
-                yield Button("Generate command", id="submit", variant="success")
-                yield Button("Cancel", id="cancel")
-            status = Static("", id="wizard-status")
-            self._status = status
-            yield status
+            with Container(id="wizard-body"):
+                with VerticalScroll(id="wizard-scroll", can_focus=True, can_focus_children=True) as scroll:
+                    scroll.show_horizontal_scrollbar = False
+                    instructions = Static(self._instructions_text(False), id="wizard-instructions")
+                    self._instructions = instructions
+                    yield instructions
+                    for field_id, label, placeholder in self.FIELD_DEFINITIONS:
+                        value = self._defaults.get(field_id, "")
+                        input_widget = Input(
+                            value=value,
+                            placeholder=placeholder,
+                            id=f"wizard-{field_id}",
+                        )
+                        self._fields[field_id] = input_widget
+                        yield Static(label, classes="wizard-label")
+                        yield input_widget
+            with Container(id="wizard-footer"):
+                with Container(id="wizard-actions"):
+                    yield Button("Generate command", id="submit", variant="success", flat=True)
+                    yield Button("Cancel", id="cancel", flat=True)
+                status = Static("", id="wizard-status")
+                self._status = status
+                yield status
         yield Footer()
 
     def on_mount(self) -> None:  # type: ignore[override]
         spec_input = self._fields.get("spec")
         if spec_input:
             spec_input.focus()
+        self._apply_layout_mode(self.size)
+
+    def on_resize(self, event: Resize) -> None:  # type: ignore[override]
+        self._apply_layout_mode(event.size)
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -132,6 +138,25 @@ class PrepareWizard(Screen[str | None]):
     def _update_status(self, message: str) -> None:
         if self._status:
             self._status.update(message)
+
+    def _instructions_text(self, compact: bool) -> Text:
+        if compact:
+            return Text.from_markup("[bold cyan]Fill the fields below; blank entries are ignored.[/]")
+        return Text.from_markup(
+            "[bold cyan]Provide the cactus-prepare arguments in each field.[/]\n"
+            "Leave a field blank to skip it, then use the buttons below to confirm."
+        )
+
+    def _apply_layout_mode(self, size: Size | None) -> None:
+        if size is None:
+            size = self.size
+        compact = size.width < 96 or size.height < 28
+        stacked_actions = size.width < 72
+        if self._instructions and compact != self._is_compact:
+            self._instructions.update(self._instructions_text(compact))
+        self._is_compact = compact
+        self.set_class(compact, "compact")
+        self.set_class(stacked_actions, "stacked-actions")
 
 
 class TemplateSelector(Screen[templates.Template | None]):
@@ -293,21 +318,41 @@ class PrepareCommandPrompt(App[PromptResult]):
     /* Wizard screen */
     #wizard-layout {
         layout: vertical;
-        height: 1fr;
         padding: 1 2;
         min-height: 0;
+        width: 1fr;
+        height: 1fr;
+    }
+    #wizard-body {
+        layout: vertical;
+        min-height: 0;
+        width: 1fr;
+        height: 1fr;
     }
     #wizard-scroll {
-        height: 1fr;
+        layout: vertical;
         padding: 0 1;
         min-height: 0;
+        width: 1fr;
+        height: 1fr;
+        overflow-y: auto;
     }
     .wizard-label { padding-top: 1; }
     .wizard-label:first-of-type { padding-top: 0; }
+    #wizard-footer { layout: vertical; padding-top: 1; height: auto; min-height: 0; max-height: 7; }
     #wizard-actions { layout: horizontal; padding: 1 0; }
     #wizard-actions Button { margin-right: 1; }
     #wizard-actions Button:last-child { margin-right: 0; }
     #wizard-status { padding: 0 0 1 0; }
+    .compact #wizard-layout { padding: 1 1; }
+    .compact #wizard-instructions { padding-bottom: 0; }
+    .stacked-actions #wizard-actions { layout: vertical; }
+    .stacked-actions #wizard-actions Button {
+        margin-right: 0;
+        margin-bottom: 1;
+        width: 1fr;
+    }
+    .stacked-actions #wizard-actions Button:last-child { margin-bottom: 0; }
 
     /* Template selection */
     #template-layout { layout: vertical; height: 1fr; padding: 1 2; min-height: 0; }
