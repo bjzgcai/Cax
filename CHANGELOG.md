@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.2] - Unreleased
+
+### UI
+- The cactus-prepare wizard now lives inside a full-height scroll container with a dedicated footer so form fields remain focusable while actions stay pinned, even in narrow or short terminals.
+- Instructions switch between compact and detailed copy, and resize-driven layout classes collapse spacing and stack buttons when needed to keep the wizard readable at any screen size.
+- Pressing `R` now switches to a dedicated Run Settings screen that gathers verbose/log streaming and the shared cactus/RaMAx thread count in one place before execution, removing the in-plan toggles.
+- The Run Settings screen shows a live plan summary next to the form, updates instantly as you toggle verbose or edit the thread count, and exposes keyboard hints (`Tab`, `Ctrl+Enter`, `V`) so the entire flow can be driven without the mouse. All instructional text has been converted to English for consistency.
+
+### CLI & Planner
+- `cax ui` still accepts `--threads N`, but the value now seeds the Run Settings dialog (or the post-UI prompt when `--run-after` is used) instead of bloating the plan definition; the planner applies `--maxCores/--threads` overrides only at execution time.
+- Plan serialization drops the `verbose`/`thread_count` fields, keeping plan files focused on cactus/RaMAx steps while run-only options live alongside the executor.
+
 ## [0.2.1] - 2025-11-07
 
 ### Highlights

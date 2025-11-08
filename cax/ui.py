@@ -9,13 +9,13 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container
 from textual.geometry import Size
-from textual.screen import ModalScreen
-from textual.widgets import Button, Footer, Header, Input, ListItem, ListView, Static, Tree, TextArea
+from textual.screen import ModalScreen, Screen
+from textual.widgets import Button, Checkbox, Footer, Header, Input, ListItem, ListView, Static, Tree, TextArea
 
 from rich.text import Text
 
 from . import detectors, planner, render, tree_utils
-from .models import Plan, Round, Step
+from .models import Plan, Round, RunSettings, Step
 
 
 @dataclass
@@ -23,6 +23,7 @@ class UIResult:
     plan: Plan
     action: str
     payload: Optional[Path] = None
+    run_settings: RunSettings | None = None
 
 
 @dataclass
@@ -35,6 +36,8 @@ class CommandTarget:
     kind: str
     step: Step | None = None
     index: int | None = None
+
+
 
 
 class CommandSelectionModal(ModalScreen[CommandTarget | None]):
@@ -96,6 +99,12 @@ class CommandSelectionModal(ModalScreen[CommandTarget | None]):
 
     def action_cancel(self) -> None:
         self.dismiss(None)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "save":
+            self.action_save()
+        elif event.button.id == "cancel":
+            self.action_cancel()
 
 
 class CommandEditModal(ModalScreen[str | None]):
@@ -175,11 +184,196 @@ class CommandEditModal(ModalScreen[str | None]):
     def action_cancel(self) -> None:
         self.dismiss(None)
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "save":
+
+class RunSettingsScreen(Screen[RunSettings | None]):
+    """Dedicated screen for confirming run-time configuration."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Back"),
+        Binding("ctrl+enter", "save", "Run"),
+        Binding("ctrl+r", "save", "Run"),
+        Binding("v", "toggle_verbose", "Toggle verbose"),
+    ]
+
+    CSS = """
+    RunSettingsScreen > .screen {
+        layout: vertical;
+    }
+    #run-root {
+        padding: 1 2;
+        height: 1fr;
+        width: 100%;
+        layout: vertical;
+        min-height: 0;
+    }
+    #run-title {
+        padding-bottom: 1;
+    }
+    #run-body {
+        layout: horizontal;
+        min-height: 0;
+    }
+    #run-summary {
+        width: 60%;
+        min-width: 40;
+        margin-right: 2;
+        height: 1fr;
+        overflow-y: auto;
+    }
+    #run-form {
+        width: 40%;
+        min-width: 32;
+        height: 1fr;
+        border: round $accent;
+        padding: 1;
+        background: $panel;
+        layout: vertical;
+    }
+    #run-instructions {
+        color: $text-muted;
+        padding-bottom: 1;
+    }
+    #run-verbose {
+        margin-bottom: 1;
+    }
+    #run-threads {
+        width: 100%;
+    }
+    #run-hint {
+        padding-top: 1;
+        color: $text-muted;
+    }
+    #run-status {
+        padding-top: 1;
+        color: $error;
+    }
+    #run-buttons {
+        padding-top: 1;
+        layout: horizontal;
+        content-align: right middle;
+    }
+    #run-buttons Button {
+        margin-left: 1;
+    }
+    #run-buttons Button:first-child {
+        margin-left: 0;
+    }
+    """
+
+    def __init__(self, plan: Plan, current: RunSettings, compact: bool):
+        super().__init__()
+        self.plan = plan
+        self.current = current
+        self.compact = compact
+        self._summary: Static | None = None
+        self._input: Input | None = None
+        self._verbose: Checkbox | None = None
+        self._status: Static | None = None
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        with Container(id="run-root"):
+            yield Static("Plan is ready. Review run settings before execution:", id="run-title")
+            with Container(id="run-body"):
+                summary = Static(id="run-summary")
+                self._summary = summary
+                summary.update(render.plan_overview(self.plan, run_settings=self.current, compact=self.compact))
+                yield summary
+                with Container(id="run-form"):
+                    yield Static("• Tab/Shift+Tab to move between controls\n• Ctrl+Enter to run immediately\n• V toggles verbose logging", id="run-instructions")
+                    verbose_box = Checkbox(
+                        "Verbose logging (stream every command output)",
+                        value=self.current.verbose,
+                        id="run-verbose",
+                    )
+                    self._verbose = verbose_box
+                    yield verbose_box
+                    threads_input = Input(
+                        value="" if self.current.thread_count is None else str(self.current.thread_count),
+                        placeholder="Leave blank to keep each command's thread defaults",
+                        id="run-threads",
+                    )
+                    self._input = threads_input
+                    yield threads_input
+                    yield Static("Threads propagate to cactus --maxCores and RaMAx --threads.", id="run-hint")
+                    status = Static("", id="run-status")
+                    self._status = status
+                    yield status
+                    with Container(id="run-buttons"):
+                        yield Button("Run plan (Ctrl+Enter)", id="run-confirm", variant="success")
+                        yield Button("Back to plan (Esc)", id="run-cancel")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        if self._input:
+            self.set_focus(self._input)
+
+    def _validate_threads(self) -> tuple[bool, Optional[int], Optional[str]]:
+        if not self._input:
+            return True, None, None
+        text = self._input.value.strip()
+        if not text:
+            return True, None, None
+        try:
+            value = int(text)
+        except ValueError:
+            return False, None, "Thread count must be a positive integer."
+        if value <= 0:
+            return False, None, "Thread count must be at least 1."
+        return True, value, None
+
+    def _update_status(self, message: str | None) -> None:
+        if self._status is not None:
+            self._status.update(message or "")
+
+    def action_save(self) -> None:
+        ok, threads, error = self._validate_threads()
+        if not ok:
+            self._update_status(error)
+            return
+        self._update_status("")
+        verbose = self._verbose.value if self._verbose else False
+        self.dismiss(RunSettings(verbose=verbose, thread_count=threads))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_toggle_verbose(self) -> None:
+        if self._verbose:
+            self._verbose.value = not self._verbose.value
+            self._refresh_summary()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "run-threads":
             self.action_save()
-        else:
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "run-threads":
+            self._refresh_summary()
+
+    def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
+        if event.checkbox.id == "run-verbose":
+            self._refresh_summary()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "run-confirm":
+            self.action_save()
+        elif event.button.id == "run-cancel":
             self.action_cancel()
+
+    def _current_settings_preview(self) -> RunSettings:
+        verbose = self._verbose.value if self._verbose else self.current.verbose
+        ok, threads, _ = self._validate_threads()
+        thread_val = threads if ok else self.current.thread_count
+        return RunSettings(verbose=verbose, thread_count=thread_val)
+
+    def _refresh_summary(self) -> None:
+        if not self._summary:
+            return
+        settings = self._current_settings_preview()
+        self._summary.update(
+            render.plan_overview(self.plan, run_settings=settings, compact=self.compact)
+        )
 
 
 class RamaxOptionsModal(ModalScreen[tuple[list[str], list[str]] | None]):
@@ -429,10 +623,9 @@ class PlanUIApp(App[UIResult]):
         Binding("s", "save_commands", "Save commands"),
         Binding("r", "run_plan", "Run"),
         Binding("q", "quit", "Quit"),
-        Binding("v", "toggle_verbose", "Toggle verbose"),
     ]
 
-    def __init__(self, plan: Plan, base_dir: Optional[Path] = None):
+    def __init__(self, plan: Plan, base_dir: Optional[Path] = None, run_settings: Optional[RunSettings] = None):
         super().__init__()
         self.plan = plan
         self.base_dir = Path(base_dir) if base_dir else Path.cwd()
@@ -442,6 +635,7 @@ class PlanUIApp(App[UIResult]):
         self.round_list: ListView | None = None
         self.detail_panel: Static | None = None
         self._environment_card: Static | None = None
+        self.run_settings = run_settings or RunSettings()
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -476,7 +670,7 @@ class PlanUIApp(App[UIResult]):
             with Container(id="details"):
                 yield environment_card
                 detail = Static(
-                    render.plan_overview(self.plan, compact=self._is_compact()),
+                    render.plan_overview(self.plan, run_settings=self.run_settings, compact=self._is_compact()),
                     id="plan-overview",
                 )
                 self.detail_panel = detail
@@ -536,42 +730,29 @@ class PlanUIApp(App[UIResult]):
 
     def action_preview_plan(self) -> None:
         if self.detail_panel:
-            preview = render.plan_overview(self.plan, compact=self._is_compact())
+            preview = render.plan_overview(self.plan, run_settings=self.run_settings, compact=self._is_compact())
             self.detail_panel.update(preview)
 
     def action_run_plan(self) -> None:
-        self.exit(UIResult(plan=self.plan, action="run"))
+        screen = RunSettingsScreen(self.plan, self.run_settings, compact=self._is_compact())
+        self.push_screen(screen, self._finalize_run_settings)
 
     def action_save_commands(self) -> None:
         output_dir = Path(self.plan.out_dir or self.base_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / "ramax_commands.txt"
-        commands = planner.build_execution_plan(self.plan, self.base_dir)
+        commands = planner.build_execution_plan(
+            self.plan,
+            self.base_dir,
+            thread_count=self.run_settings.thread_count,
+        )
         lines = [cmd.shell_preview() for cmd in commands]
         output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         if self.detail_panel:
             self.detail_panel.update(f"Commands saved to {output_path}")
 
     def action_quit(self) -> None:
-        self.exit(UIResult(plan=self.plan, action="quit"))
-
-    def action_toggle_verbose(self) -> None:
-        self.plan.verbose = not self.plan.verbose
-        message = "Verbose logging enabled" if self.plan.verbose else "Verbose logging disabled"
-        if self.alignment_tree and self.tree_widget:
-            node = self._selected_alignment_node()
-            if node:
-                self._show_alignment_node(node, status=message)
-            elif self.detail_panel:
-                self.detail_panel.update(message)
-        elif self.round_list and self.round_items:
-            index = self.round_list.index or 0
-            if index < len(self.plan.rounds):
-                self._show_round(index, status=message)
-            elif self.detail_panel:
-                self.detail_panel.update(message)
-        elif self.detail_panel:
-            self.detail_panel.update(message)
+        self.exit(UIResult(plan=self.plan, action="quit", run_settings=self.run_settings))
 
     def _apply_env_visibility(self) -> None:
         if not self._environment_card:
@@ -887,21 +1068,35 @@ class PlanUIApp(App[UIResult]):
                 return
         self._show_round(round_index, status=status)
 
+    def _finalize_run_settings(self, result: RunSettings | None) -> None:
+        if result is None:
+            return
+        self.run_settings = result
+        self.exit(UIResult(plan=self.plan, action="run", run_settings=self.run_settings))
+
     def _ramax_command_preview(self, round_entry: Round) -> str:
         if round_entry.manual_ramax_command:
             return round_entry.manual_ramax_command
-        commands = planner.build_execution_plan(self.plan, self.base_dir)
+        commands = planner.build_execution_plan(
+            self.plan,
+            self.base_dir,
+            thread_count=self.run_settings.thread_count,
+        )
         for command in commands:
             if command.is_ramax and command.round_name == round_entry.name:
                 return command.shell_preview()
         return ""
 
 
-def launch(plan: Plan, base_dir: Optional[Path] = None) -> UIResult:
+def launch(
+    plan: Plan,
+    base_dir: Optional[Path] = None,
+    run_settings: Optional[RunSettings] = None,
+) -> UIResult:
     """Run the Textual UI and return the resulting plan/action."""
 
-    app = PlanUIApp(plan, base_dir=base_dir)
+    app = PlanUIApp(plan, base_dir=base_dir, run_settings=run_settings)
     result = app.run()
     if isinstance(result, UIResult):
         return result
-    return UIResult(plan=plan, action="quit")
+    return UIResult(plan=plan, action="quit", run_settings=run_settings)

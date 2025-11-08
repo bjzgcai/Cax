@@ -10,11 +10,11 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from .models import Plan
+from .models import Plan, RunSettings
 from .planner import PlannedCommand
 
 
-def plan_overview(plan: Plan, compact: bool = False) -> Panel:
+def plan_overview(plan: Plan, run_settings: Optional[RunSettings] = None, compact: bool = False) -> Panel:
     """Return a Rich Panel summarising the plan (auto-resizes in UI)."""
 
     table = Table(
@@ -46,7 +46,14 @@ def plan_overview(plan: Plan, compact: bool = False) -> Panel:
             row.append(round_entry.workdir or "")
         table.add_row(*row)
 
-    footer = Text(f"Verbose logging: {'on' if plan.verbose else 'off'}", style="dim")
+    settings = run_settings or RunSettings()
+    thread_label = (
+        "auto (command defaults)"
+        if settings.thread_count is None
+        else f"{settings.thread_count} threads (--maxCores/--threads)"
+    )
+    footer_text = f"Verbose logging: {'on' if settings.verbose else 'off'} | Thread target: {thread_label}"
+    footer = Text(footer_text, style="dim")
     content = Group(table, footer)
     return Panel(content, border_style="magenta", expand=True)
 

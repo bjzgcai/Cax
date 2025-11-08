@@ -11,6 +11,7 @@ from rich import print
 import shutil
 
 from . import command_prompt, history, parser, render, ui as ui_module
+from .models import RunSettings
 from .runner import PlanRunner
 
 app = typer.Typer(help="Cactus-RaMAx interactive tools (ui only)")
@@ -49,6 +50,11 @@ def ui(
     prepare_args: Optional[str] = typer.Option(None, help="Arguments passed through to cactus-prepare"),
     from_file: Optional[Path] = typer.Option(None, help="Parse prepare output from an existing file"),
     run_after: bool = typer.Option(False, help="Run the plan after exiting the UI"),
+    threads: Optional[int] = typer.Option(
+        None,
+        min=1,
+        help="Override cactus/RaMAx thread count for all steps (leave unset for command defaults)",
+    ),
 ) -> None:
     """Launch the interactive Textual UI for plan editing."""
 
@@ -65,17 +71,56 @@ def ui(
     _ensure_clean_environment(out_dir_preview, job_store_preview)
     text = _load_prepare_text(prepare_args, from_file, executable=executable)
     plan = parser.parse_prepare_script(text)
-    result = ui_module.launch(plan)
+    run_settings = RunSettings(verbose=False, thread_count=threads)
+    result = ui_module.launch(plan, run_settings=run_settings)
     plan = result.plan
+    run_settings = result.run_settings or run_settings
     if result.action == "run" or run_after:
-        runner = PlanRunner(plan, verbose=plan.verbose)
+        if result.action != "run":
+            run_settings = _prompt_run_settings(run_settings)
+        runner = PlanRunner(plan, run_settings=run_settings)
         runner.run()
     else:
-        print(render.plan_overview(plan))
+        print(render.plan_overview(plan, run_settings=run_settings))
 
 
 if __name__ == "__main__":
     app()
+
+
+def _prompt_run_settings(defaults: RunSettings) -> RunSettings:
+    """Collect run-time settings from the user just before execution."""
+
+    typer.echo("[cax] Configure run settings before execution:")
+    verbose = typer.confirm(
+        "Enable verbose logging (stream every command output)?",
+        default=defaults.verbose,
+    )
+
+    thread_count = defaults.thread_count
+    while True:
+        default_display = "" if thread_count is None else str(thread_count)
+        prompt = typer.prompt(
+            "Thread count for cactus/RaMAx (blank = auto)",
+            default=default_display,
+            show_default=bool(default_display),
+        )
+        stripped = prompt.strip()
+        if not stripped:
+            thread_count = None
+            break
+        try:
+            value = int(stripped)
+        except ValueError:
+            typer.echo("[cax] Please enter a positive integer or leave blank.")
+            continue
+        if value <= 0:
+            typer.echo("[cax] Thread count must be at least 1.")
+            continue
+        thread_count = value
+        break
+
+    return RunSettings(verbose=verbose, thread_count=thread_count)
 
 
 def _prepare_plan_preview(

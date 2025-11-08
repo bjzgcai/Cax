@@ -12,7 +12,7 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn, TaskID
 
 from . import planner
-from .models import Plan
+from .models import Plan, RunSettings
 
 
 IMPORTANT_KEYWORDS = ("error", "failed", "exception", "critical")
@@ -27,7 +27,7 @@ class PlanRunner:
         base_dir: Optional[Path] = None,
         env: Optional[dict[str, str]] = None,
         mirror_stdout: bool = True,
-        verbose: bool = False,
+        run_settings: Optional[RunSettings] = None,
     ):
         self.plan = plan
         self.base_dir = Path(base_dir) if base_dir else Path.cwd()
@@ -38,13 +38,19 @@ class PlanRunner:
         self.master_log_path = self.log_root / "cax-run.log"
         self.mirror_stdout = mirror_stdout
         self.console = Console(stderr=True)
-        self.verbose = verbose
+        self.run_settings = run_settings or RunSettings()
+        self.verbose = self.run_settings.verbose
+        self.thread_count = self.run_settings.thread_count
 
     def run(self, dry_run: Optional[bool] = None) -> None:
         """Execute the plan. When ``dry_run`` is True, commands are only logged."""
 
         effective_dry = self.plan.dry_run if dry_run is None else dry_run
-        planned_commands = planner.build_execution_plan(self.plan, self.base_dir)
+        planned_commands = planner.build_execution_plan(
+            self.plan,
+            self.base_dir,
+            thread_count=self.thread_count,
+        )
         self.log_root.mkdir(parents=True, exist_ok=True)
         total_commands = len(planned_commands)
         completed_commands = 0

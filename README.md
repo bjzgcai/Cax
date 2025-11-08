@@ -44,17 +44,19 @@ cax
   ```bash
   cax --from-file steps-output/prepare_output.txt
   ```
+- Pass `--threads 32` to seed the run-settings prompt so cactus steps inherit `--maxCores 32` and RaMAx receives `--threads 32`; leave it unset to default to each command's original flag.
 
 ### 2. Work inside the UI
 
 - The left pane renders the cactus progressive tree; press **Space** to toggle the selected subtree between cactus and RaMAx (use **Ctrl+Space** to expand or collapse nodes).
 - The details pane now includes an environment summary card (RaMAx/cactus paths, versions, GPU, CPU, memory, disk) plus a compact plan overview table that adapts to narrow terminals.
 - `E`: edit commands for the selected round or RaMAx replacement in a multi-line editor (press **Ctrl+S** to save).
-- `R`: run the entire plan immediately.
+- `R`: run the entire plan; CAX switches to the Run Settings screen so you can review verbose logging and the shared thread count before execution.
+- Run Settings shows a live plan summary next to the form, and you can drive it entirely with the keyboard (`Tab` / `Shift+Tab` to focus fields, `Ctrl+Enter` to launch, `V` to toggle verbose).
 - `S`: export all commands to `ramax_commands.txt` inside the chosen output directory.
 - `P`: refresh the overview table.
 - `Q`: quit the UI.
-- `V`: toggle verbose logging (when on, all command output is streamed to the console; off by default).
+- Verbose streaming is only controlled via the run-settings dialog so you can review the choice right before execution.
 
 When RaMAx is enabled for a round or subtree, execution stops on the first failure—it does not fall back to cactus `blast`/`align` automatically.
 

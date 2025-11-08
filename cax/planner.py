@@ -29,7 +29,11 @@ class PlannedCommand:
         return shlex.join(self.command)
 
 
-def build_execution_plan(plan: Plan, base_dir: Optional[Path] = None) -> list[PlannedCommand]:
+def build_execution_plan(
+    plan: Plan,
+    base_dir: Optional[Path] = None,
+    thread_count: Optional[int] = None,
+) -> list[PlannedCommand]:
     """Materialise the full list of commands that should be executed."""
 
     base_dir = base_dir or Path.cwd()
@@ -39,29 +43,46 @@ def build_execution_plan(plan: Plan, base_dir: Optional[Path] = None) -> list[Pl
     skip_roots = _compute_skipped_roots(plan, tree)
 
     for step in plan.preprocess:
-        commands.append(_from_step(step, category="preprocess", base_dir=base_dir))
+        commands.append(
+            _from_step(
+                step,
+                category="preprocess",
+                base_dir=base_dir,
+                thread_count=thread_count,
+            )
+        )
 
     for round_entry in plan.rounds:
         if round_entry.root in skip_roots:
             continue
-        commands.extend(_round_commands(plan, round_entry, base_dir))
+        commands.extend(_round_commands(plan, round_entry, base_dir, thread_count))
 
     for step in plan.hal_merges:
         if step.root and step.root in skip_roots:
             continue
-        commands.append(_from_step(step, category="halmerge", base_dir=base_dir))
+        commands.append(
+            _from_step(
+                step,
+                category="halmerge",
+                base_dir=base_dir,
+                thread_count=thread_count,
+            )
+        )
 
     return commands
 
 
-def _round_commands(plan: Plan, round_entry: Round, base_dir: Path) -> list[PlannedCommand]:
+def _round_commands(
+    plan: Plan,
+    round_entry: Round,
+    base_dir: Path,
+    thread_count: Optional[int],
+) -> list[PlannedCommand]:
     cmds: list[PlannedCommand] = []
     round_name = round_entry.name
 
     if round_entry.replace_with_ramax:
-        cmds.append(
-            _ramax_command(plan, round_entry, base_dir)
-        )
+        cmds.append(_ramax_command(plan, round_entry, base_dir, thread_count))
     else:
         if round_entry.blast_step:
             cmds.append(
@@ -70,6 +91,7 @@ def _round_commands(plan: Plan, round_entry: Round, base_dir: Path) -> list[Plan
                     category="blast",
                     base_dir=base_dir,
                     round_name=round_name,
+                    thread_count=thread_count,
                 )
             )
         if round_entry.align_step:
@@ -79,6 +101,7 @@ def _round_commands(plan: Plan, round_entry: Round, base_dir: Path) -> list[Plan
                     category="align",
                     base_dir=base_dir,
                     round_name=round_name,
+                    thread_count=thread_count,
                 )
             )
 
@@ -89,6 +112,7 @@ def _round_commands(plan: Plan, round_entry: Round, base_dir: Path) -> list[Plan
                 category="hal2fasta",
                 base_dir=base_dir,
                 round_name=round_name,
+                thread_count=thread_count,
             )
         )
 
@@ -100,10 +124,12 @@ def _from_step(
     category: str,
     base_dir: Path,
     round_name: Optional[str] = None,
+    thread_count: Optional[int] = None,
 ) -> PlannedCommand:
     command = _split_command(step.raw)
     if step.kind == "hal2fasta":
         command = _normalize_hal2fasta(command)
+    command = _ensure_cactus_threads(command, thread_count)
     log_path = Path(step.log_file) if step.log_file else None
     display_name = step.short_label()
     return PlannedCommand(
@@ -116,7 +142,12 @@ def _from_step(
     )
 
 
-def _ramax_command(plan: Plan, round_entry: Round, base_dir: Path) -> PlannedCommand:
+def _ramax_command(
+    plan: Plan,
+    round_entry: Round,
+    base_dir: Path,
+    thread_count: Optional[int],
+) -> PlannedCommand:
     workdir = round_entry.workdir
     if not workdir and plan.out_dir:
         workdir = str(Path(plan.out_dir) / "temps" / f"blast-{round_entry.root}")
@@ -137,6 +168,7 @@ def _ramax_command(plan: Plan, round_entry: Round, base_dir: Path) -> PlannedCom
             command.extend(["-w", workdir])
         command.extend(plan.global_ramax_opts)
         command.extend(round_entry.ramax_opts)
+        command = _ensure_ramax_threads(command, thread_count)
 
     log_path = _guess_ramax_log_path(plan, round_entry, base_dir)
 
@@ -219,6 +251,41 @@ def _normalize_hal2fasta(command: List[str]) -> List[str]:
     if out_path:
         cleaned.extend(["--outFaPath", out_path])
     return cleaned
+
+
+def _ensure_cactus_threads(command: List[str], thread_count: Optional[int]) -> List[str]:
+    if thread_count is None or not command:
+        return command
+    name = Path(command[0]).name
+    if not name.startswith("cactus"):
+        return command
+    if _has_flag(command, "--maxCores"):
+        return command
+    adjusted = list(command)
+    adjusted.extend(["--maxCores", str(thread_count)])
+    return adjusted
+
+
+def _ensure_ramax_threads(command: List[str], thread_count: Optional[int]) -> List[str]:
+    if thread_count is None or not command:
+        return command
+    name = Path(command[0]).name.lower()
+    if name != "ramax":
+        return command
+    if _has_flag(command, "--threads"):
+        return command
+    adjusted = list(command)
+    adjusted.extend(["--threads", str(thread_count)])
+    return adjusted
+
+
+def _has_flag(command: List[str], flag: str) -> bool:
+    for token in command:
+        if token == flag:
+            return True
+        if token.startswith(flag + "="):
+            return True
+    return False
 
 
 def _compute_skipped_roots(plan: Plan, tree: Optional[tree_utils.AlignmentTree]) -> set[str]:

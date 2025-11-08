@@ -1,6 +1,7 @@
 """Core data models for the Cactus-RaMAx workflow."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal, Optional
 
@@ -90,7 +91,6 @@ class Plan(BaseModel):
     out_dir: Optional[str] = None
     dry_run: bool = False
     global_ramax_opts: list[str] = Field(default_factory=list)
-    verbose: bool = False
 
     @field_validator("out_seq_file")
     @classmethod
@@ -98,3 +98,11 @@ class Plan(BaseModel):
         if not value:
             raise ValueError("out_seq_file cannot be empty")
         return value
+
+
+@dataclass
+class RunSettings:
+    """Runtime-only options applied immediately before executing a plan."""
+
+    verbose: bool = False
+    thread_count: Optional[int] = None
