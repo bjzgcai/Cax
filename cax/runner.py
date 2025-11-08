@@ -5,11 +5,14 @@ import os
 from contextlib import nullcontext
 from pathlib import Path
 import subprocess
+import threading
 import time
 from typing import Optional
 
+import psutil
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn, TaskID
+from rich.text import Text
 
 from . import planner
 from .models import Plan, RunSettings
@@ -62,6 +65,10 @@ class PlanRunner:
                 TextColumn("{task.description}"),
                 TextColumn("({task.completed}/{task.total} done)"),
                 TextColumn("[dim]{task.fields[remaining]} left[/dim]"),
+                TextColumn("wait {task.fields[wait]}", style="magenta"),
+                TextColumn("CPU {task.fields[cpu]}", style="yellow"),
+                TextColumn("mem {task.fields[mem]}", style="cyan"),
+                TextColumn("peak {task.fields[mem_peak]}", style="cyan"),
                 TimeElapsedColumn(),
                 console=self.console,
                 transient=True,
@@ -79,14 +86,24 @@ class PlanRunner:
                         "Plan execution",
                         total=remaining,
                         remaining=remaining,
+                        wait="0.0s",
+                        cpu="--",
+                        mem="--",
+                        mem_peak="--",
                     )
                 for command in planned_commands:
+                    preview = command.shell_preview()
                     task_id: TaskID | None = None
                     if isinstance(progress, Progress):
                         progress.update(
                             overall_task,
                             description=f"[cyan]{command.display_name}[/cyan]",
+                            wait="0.0s",
+                            cpu="--",
+                            mem="--",
+                            mem_peak="--",
                         )
+                        self._announce_command(preview, progress)
                         task_id = overall_task
                     success = self._run_single(
                         command,
@@ -94,6 +111,7 @@ class PlanRunner:
                         effective_dry,
                         progress if isinstance(progress, Progress) else None,
                         task_id,
+                        preview,
                     )
                     if not success:
                         if isinstance(progress, Progress):
@@ -137,9 +155,10 @@ class PlanRunner:
         dry_run: bool,
         progress: Optional[Progress],
         task_id,
+        preview: Optional[str] = None,
     ) -> bool:
         start_time = time.time()
-        preview = command.shell_preview()
+        preview = preview or command.shell_preview()
         master_log.write(f"[start] {command.display_name}: {preview}\n")
         master_log.flush()
         if progress is None and self.mirror_stdout:
@@ -154,6 +173,7 @@ class PlanRunner:
                 progress.update(
                     task_id,
                     description=f"[yellow]⏭ {command.display_name} (dry-run)[/yellow]",
+                    **_basic_metric_fields(elapsed),
                 )
             elif self.mirror_stdout:
                 self.console.print(f"[yellow][skip][/yellow] {command.display_name} (dry-run {elapsed:.1f}s)")
@@ -165,6 +185,7 @@ class PlanRunner:
         step_log_path = command.log_path or (self.log_root / f"{command.display_name}.log")
         step_log_path.parent.mkdir(parents=True, exist_ok=True)
 
+        telemetry: _CommandTelemetry | None = None
         with step_log_path.open("a", encoding="utf-8") as step_log:
             step_log.write(f"# Command: {preview}\n")
             step_log.flush()
@@ -185,8 +206,13 @@ class PlanRunner:
                     step_log,
                     progress,
                     task_id,
+                    preview,
                 )
             assert proc.stdout is not None
+            if progress is not None and task_id is not None:
+                telemetry_candidate = _CommandTelemetry(progress, task_id, start_time)
+                if telemetry_candidate.start(proc.pid):
+                    telemetry = telemetry_candidate
             for line in proc.stdout:
                 step_log.write(line)
                 master_log.write(line)
@@ -196,6 +222,12 @@ class PlanRunner:
                     self._emit_important(line, progress)
             return_code = proc.wait()
             duration = time.time() - start_time
+            telemetry_fields: dict[str, str] = {}
+            if progress is not None and task_id is not None:
+                if telemetry is not None:
+                    telemetry_fields = telemetry.stop(duration)
+                else:
+                    telemetry_fields = _basic_metric_fields(duration)
             step_log.write(f"\n# Exit code: {return_code} ({duration:.1f}s)\n")
             step_log.flush()
             master_log.write(f"[end] {command.display_name} -> {return_code} ({duration:.1f}s)\n")
@@ -203,13 +235,21 @@ class PlanRunner:
 
             if return_code != 0:
                 if progress is not None and task_id is not None:
-                    progress.update(task_id, description=f"[red]✖ {command.display_name} ({duration:.1f}s)[/red]")
+                    progress.update(
+                        task_id,
+                        description=f"[red]✖ {command.display_name} ({duration:.1f}s)[/red]",
+                        **telemetry_fields,
+                    )
                 elif self.mirror_stdout:
                     self.console.print(f"[red][end][/red] {command.display_name} -> {return_code} ({duration:.1f}s)")
                 return False
 
             if progress is not None and task_id is not None:
-                progress.update(task_id, description=f"[green]✔ {command.display_name} ({duration:.1f}s)[/green]")
+                progress.update(
+                    task_id,
+                    description=f"[green]✔ {command.display_name} ({duration:.1f}s)[/green]",
+                    **telemetry_fields,
+                )
             elif self.mirror_stdout:
                 self.console.print(f"[green][end][/green] {command.display_name} ({duration:.1f}s)")
             return True
@@ -220,6 +260,17 @@ class PlanRunner:
             with command.log_path.open("a", encoding="utf-8") as log_file:
                 log_file.write(f"# DRY RUN\n# {preview}\n")
 
+    def _announce_command(self, preview: str, progress: Optional[Progress]) -> None:
+        text = Text("command ", style="dim", overflow="fold", no_wrap=False)
+        text.append(preview)
+        console: Console | None = None
+        if progress is not None:
+            console = progress.console
+        elif self.mirror_stdout:
+            console = self.console
+        if console is not None:
+            console.print(text)
+
     def _handle_launch_failure(
         self,
         command: planner.PlannedCommand,
@@ -228,13 +279,18 @@ class PlanRunner:
         step_log,
         progress: Optional[Progress],
         task_id,
+        preview: str,
     ) -> bool:
         message = f"[error] Failed to launch {command.display_name}: {exc}\n"
         step_log.write(message)
         master_log.write(message)
         master_log.flush()
         if progress is not None and task_id is not None:
-            progress.update(task_id, description=f"[red]✖ {command.display_name} (launch failed)[/red]")
+            progress.update(
+                task_id,
+                description=f"[red]✖ {command.display_name} (launch failed)[/red]",
+                **_basic_metric_fields(0.0),
+            )
         elif self.mirror_stdout:
             self.console.print(f"[red]{message.rstrip()}[/red]")
         return False
@@ -276,6 +332,138 @@ class PlanRunner:
         if self.plan.out_dir:
             return _to_path(self.plan.out_dir, self.base_dir) / "logs"
         return (self.base_dir / "logs").resolve()
+
+
+def _format_duration(seconds: float) -> str:
+    if seconds < 0:
+        seconds = 0.0
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes, sec = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m"
+    return f"{minutes}m{sec:02d}s"
+
+
+def _format_bytes(value: int) -> str:
+    if value <= 0:
+        return "0B"
+    units = ("B", "KB", "MB", "GB", "TB")
+    num = float(value)
+    for unit in units:
+        if num < 1024 or unit == units[-1]:
+            return f"{num:.1f}{unit}"
+        num /= 1024
+    return f"{num:.1f}TB"
+
+
+def _format_cpu(value: Optional[float]) -> str:
+    if value is None or value < 0:
+        return "--"
+    return f"{value:.1f}%"
+
+
+def _basic_metric_fields(elapsed: float) -> dict[str, str]:
+    return {
+        "wait": _format_duration(elapsed),
+        "cpu": "--",
+        "mem": "--",
+        "mem_peak": "--",
+    }
+
+
+class _CommandTelemetry:
+    """Collect per-step CPU and memory stats for the progress bar."""
+
+    def __init__(
+        self,
+        progress: Progress,
+        task_id: TaskID,
+        start_time: float,
+        interval: float = 0.5,
+    ) -> None:
+        self.progress = progress
+        self.task_id = task_id
+        self.start_time = start_time
+        self.interval = interval
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._process: psutil.Process | None = None
+        self._peak_bytes = 0
+        self._latest: dict[str, str] = _basic_metric_fields(0.0)
+
+    def start(self, pid: int) -> bool:
+        try:
+            self._process = psutil.Process(pid)
+        except psutil.Error:
+            return False
+        self._prime_cpu_counters(self._process)
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        return True
+
+    def stop(self, final_duration: float) -> dict[str, str]:
+        if self._thread is not None:
+            self._stop_event.set()
+            self._thread.join(timeout=2.0)
+        final_fields = dict(self._latest)
+        final_fields["wait"] = _format_duration(final_duration)
+        return final_fields
+
+    def _run(self) -> None:
+        while not self._stop_event.wait(self.interval):
+            self._update_fields()
+        self._update_fields()
+
+    def _update_fields(self) -> None:
+        fields = dict(self._latest)
+        elapsed = time.time() - self.start_time
+        fields["wait"] = _format_duration(elapsed)
+        process = self._process
+        if process is not None:
+            cpu_value, mem_bytes = self._collect_stats(process)
+            if cpu_value is not None:
+                fields["cpu"] = _format_cpu(cpu_value)
+            if mem_bytes is not None:
+                self._peak_bytes = max(self._peak_bytes, mem_bytes)
+                fields["mem"] = _format_bytes(mem_bytes)
+                fields["mem_peak"] = _format_bytes(self._peak_bytes)
+        self._latest = fields
+        self.progress.update(self.task_id, **fields)
+
+    def _collect_stats(self, root: psutil.Process) -> tuple[Optional[float], Optional[int]]:
+        total_cpu = 0.0
+        total_mem = 0
+        sampled = False
+        try:
+            processes = [root, *root.children(recursive=True)]
+        except psutil.Error:
+            return None, None
+        for proc in processes:
+            try:
+                with proc.oneshot():
+                    cpu_part = proc.cpu_percent(interval=None)
+                    mem_info = proc.memory_info()
+            except psutil.Error:
+                continue
+            sampled = True
+            total_cpu += cpu_part
+            total_mem += mem_info.rss
+        if not sampled:
+            return None, None
+        return total_cpu, total_mem
+
+    def _prime_cpu_counters(self, process: psutil.Process) -> None:
+        try:
+            processes = [process, *process.children(recursive=True)]
+        except psutil.Error:
+            processes = [process]
+        for proc in processes:
+            try:
+                proc.cpu_percent(interval=None)
+            except psutil.Error:
+                continue
 
 
 def _to_path(path_like: str, base_dir: Path) -> Path:

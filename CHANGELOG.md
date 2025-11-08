@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.2.2] - Unreleased
+## [0.2.2] - 2025-11-08
 
 ### UI
 - The cactus-prepare wizard now lives inside a full-height scroll container with a dedicated footer so form fields remain focusable while actions stay pinned, even in narrow or short terminals.
@@ -13,6 +13,10 @@ All notable changes to this project will be documented in this file.
 ### CLI & Planner
 - `cax ui` still accepts `--threads N`, but the value now seeds the Run Settings dialog (or the post-UI prompt when `--run-after` is used) instead of bloating the plan definition; the planner applies `--maxCores/--threads` overrides only at execution time.
 - Plan serialization drops the `verbose`/`thread_count` fields, keeping plan files focused on cactus/RaMAx steps while run-only options live alongside the executor.
+
+### Runner
+- Enhanced the quiet-mode progress bar with wait time, CPU utilization, memory usage, and peak memory columns, while printing the full command in a separate line so the bar stays readable on narrow terminals.
+- Added a psutil-backed telemetry thread that periodically aggregates CPU and memory stats from the running command and its descendants, synchronizing the metrics on dry-run skips, failures, and successful completions.
 
 ## [0.2.1] - 2025-11-07
 
