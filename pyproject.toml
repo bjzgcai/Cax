@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cactus-ramax"
-version = "0.2.2"
+version = "0.3.0-dev"
 description = "Interactive tooling for mixing cactus and RaMAx workflows"
 authors = [{name = "Cactus-RaMAx Team"}]
 readme = "README.md"

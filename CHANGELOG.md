@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0-dev] - Unreleased
+
+### UI
+- Rebuilt the alignment browser as an ASCII phylogenetic canvas with clado/phylo modes, proportional branch spacing, subtree focus/return, and RaMAx toggles that repaint the tree in place without the old Textual tree widget.
+- Added search (`/`, `n` / `Shift+N`), zoom, ASCII glyph fallback, and a detail buffer/info modal so large trees stay navigable and summaries remain visible even on narrow terminals.
+
+### Tree parsing
+- Alignment nodes now retain branch lengths, support values, and parent links, enabling proportional layouts and state colouring while tolerating unlabeled or missing edges.
+- Newick parsing accepts numeric internal labels as support scores and ignores malformed branch lengths instead of failing the entire parse.
+
+### CLI & plumbing
+- Moved the plan overview/environment rendering helpers into `cax.ui` (retiring `cax.render`) and pointed CLI previews at the shared UI renderer for consistent output and script exports.
+
+### Tests
+- Removed the outdated planner-skips and tree-utils tests pending replacement after the parser/UI overhaul.
+
 ## [0.2.2] - 2025-11-08
 
 ### UI

@@ -10,7 +10,7 @@ import typer
 from rich import print
 import shutil
 
-from . import command_prompt, history, parser, render, ui as ui_module
+from . import command_prompt, history, parser, ui as ui_module
 from .models import RunSettings
 from .runner import PlanRunner
 
@@ -81,7 +81,7 @@ def ui(
         runner = PlanRunner(plan, run_settings=run_settings)
         runner.run()
     else:
-        print(render.plan_overview(plan, run_settings=run_settings))
+        print(ui_module.plan_overview(plan, run_settings=run_settings))
 
 
 if __name__ == "__main__":

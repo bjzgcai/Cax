@@ -12,7 +12,7 @@ class NewickParseError(RuntimeError):
     """Raised when a Newick tree cannot be parsed correctly."""
 
 
-@dataclass
+@dataclass(eq=False)
 class AlignmentNode:
     """Node within the cactus alignment tree."""
 
@@ -20,6 +20,8 @@ class AlignmentNode:
     children: list["AlignmentNode"] = field(default_factory=list)
     round: Optional[Round] = None
     parent: Optional["AlignmentNode"] = field(default=None, repr=False)
+    length: Optional[float] = None
+    support: Optional[float] = None
 
     def walk(self) -> Iterator["AlignmentNode"]:
         """Yield this node and all descendants."""
@@ -146,9 +148,10 @@ class _NewickParser:
                     self.index += 1
                     break
                 raise NewickParseError(f"Expected ',' or ')' at position {self.index}")
-            name = self._parse_label()
-            self._parse_branch_length()
-            node = AlignmentNode(name=name or "", children=children)
+            label = self._parse_label()
+            length = self._parse_branch_length_value()
+            name, support = self._split_name_support(label, internal=True)
+            node = AlignmentNode(name=name or "", children=children, length=length, support=support)
             for child in children:
                 child.parent = node
             return node
@@ -156,8 +159,9 @@ class _NewickParser:
         label = self._parse_label()
         if not label:
             raise NewickParseError(f"Missing leaf label at position {self.index}")
-        self._parse_branch_length()
-        return AlignmentNode(name=label)
+        length = self._parse_branch_length_value()
+        name, _ = self._split_name_support(label, internal=False)
+        return AlignmentNode(name=name, length=length)
 
     def _parse_label(self) -> str:
         self._skip_ws()
@@ -173,22 +177,31 @@ class _NewickParser:
         self._skip_ws()
         return label
 
-    def _parse_branch_length(self) -> None:
+    def _parse_branch_length_value(self) -> Optional[float]:
         self._skip_ws()
         if self._peek() != ":":
-            return
+            return None
         self.index += 1
         start = self.index
-        while self.index < self.length:
-            char = self.text[self.index]
-            if char in ",();":
-                break
-            if char.isspace():
-                break
+        while self.index < self.length and self.text[self.index] not in ",(); \t\r\n":
             self.index += 1
-        if start == self.index:
-            raise NewickParseError(f"Missing branch length at position {self.index}")
+        token = self.text[start:self.index].strip()
         self._skip_ws()
+        if not token:
+            return None
+        try:
+            return float(token)
+        except ValueError:
+            return None
+
+    def _split_name_support(self, label: str, internal: bool) -> tuple[str, Optional[float]]:
+        text = (label or "").strip()
+        if internal and text and all(ch.isdigit() or ch == "." for ch in text):
+            try:
+                return "", float(text)
+            except ValueError:
+                return "", None
+        return text, None
 
     def _skip_ws(self) -> None:
         while self.index < self.length and self.text[self.index].isspace():
