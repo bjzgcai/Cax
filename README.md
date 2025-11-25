@@ -1,6 +1,6 @@
 # Cactus-RaMAx
 
-Cactus-RaMAx helps you remix alignment plans emitted by `cactus-prepare`. You can inspect every round, toggle RaMAx for any subtree, and then run or export the resulting command list. Version `0.2.1` adds a Textual command prompt with an argument wizard, template chooser, and command history so first-time runs need fewer flags before you drop into the UI.
+Cactus-RaMAx helps you remix alignment plans emitted by `cactus-prepare`. You can inspect every round, toggle RaMAx for any subtree, and then run or export the resulting command list. Version `0.3.0` introduces an ASCII phylogenetic canvas with subtree/single-node toggle scopes, search, proportional branch spacing, and a bottom HUD that summarizes the current node, coverage, and live system metrics.
 
 ## Environment setup
 
@@ -48,13 +48,10 @@ cax
 
 ### 2. Work inside the UI
 
-- The left pane renders the cactus progressive tree; press **Space** to toggle the selected subtree between cactus and RaMAx (use **Ctrl+Space** to expand or collapse nodes).
-- The details pane now includes an environment summary card (RaMAx/cactus paths, versions, GPU, CPU, memory, disk) plus a compact plan overview table that adapts to narrow terminals.
+- The left pane renders an ASCII phylogenetic canvas with proportional branch spacing; use arrow keys or **h/j/k/l** to move, press **Space** to toggle RaMAx using the current scope, and press **b** to switch the scope between subtree and single node. Press **/** to search node names, then **n** / **Shift+N** to cycle through matches.
+- The canvas paints cactus vs. RaMAx states inline, annotates branch lengths on dotted leaders, and shows a bottom HUD with identity, subtree/total RaMAx coverage, and live CPU/GPU/memory/disk metrics. Press **i** for a full detail modal of the current node.
 - `E`: edit commands for the selected round or RaMAx replacement in a multi-line editor (press **Ctrl+S** to save).
-- `R`: run the entire plan; CAX switches to the Run Settings screen so you can review verbose logging and the shared thread count before execution.
-- Run Settings shows a live plan summary next to the form, and you can drive it entirely with the keyboard (`Tab` / `Shift+Tab` to focus fields, `Ctrl+Enter` to launch, `V` to toggle verbose).
-- `S`: export all commands to `ramax_commands.txt` inside the chosen output directory.
-- `P`: refresh the overview table.
+- `R`: open the Run Settings screen to review verbose logging and the shared thread count, run the plan, or save the generated command list. The screen keeps a live plan summary and is fully keyboard-driven (`Tab` / `Shift+Tab`, **Ctrl+Enter**, **V**).
 - `Q`: quit the UI.
 - Verbose streaming is only controlled via the run-settings dialog so you can review the choice right before execution.
 

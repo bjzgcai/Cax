@@ -1,16 +1,20 @@
 """Textual-based interactive UI for configuring CAX plans."""
 from __future__ import annotations
 
+import itertools
 import math
 import shlex
+import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
+import psutil
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container
+from textual.containers import Container, Horizontal, Vertical
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Checkbox, Footer, Header, Input, ListItem, ListView, Static, TextArea
 
@@ -18,6 +22,8 @@ from rich.console import Console, Group, RenderableType
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
+from rich.align import Align
+from rich.console import Group
 
 from . import planner, tree_utils
 from .models import Plan, Round, RunSettings, Step
@@ -391,10 +397,9 @@ class AsciiPhylo(Static):
     AsciiPhylo {
         width: 1fr;
         height: 1fr;
-        border: round $panel-darken-2;
         padding: 0 1;
         overflow: hidden;
-        background: $panel;
+        background: #0d1117;
     }
     """
 
@@ -409,16 +414,11 @@ class AsciiPhylo(Static):
         Binding("j", "move_down", show=False),
         Binding("k", "move_up", show=False),
         Binding("l", "move_child", show=False),
-        Binding("space", "toggle_subtree", "Toggle RaMAx"),
-        Binding("f", "focus_here", "Focus"),
-        Binding("b", "focus_back", "Back"),
-        Binding("g", "toggle_mode", "Clado/Phylo"),
-        Binding("+", "zoom_in", "Zoom in"),
-        Binding("-", "zoom_out", "Zoom out"),
+        Binding("space", "toggle_apply", "Toggle"),
+        Binding("b", "toggle_scope", "Scope node/subtree"),
         Binding("/", "open_search", "Search"),
         Binding("n", "search_next", show=False),
         Binding("shift+n", "search_prev", show=False),
-        Binding("a", "toggle_ascii", "ASCII mode"),
     ]
 
     def __init__(self, root: tree_utils.AlignmentNode, *, id: str = "ascii-phylo"):
@@ -428,8 +428,8 @@ class AsciiPhylo(Static):
         self._stack: list[tree_utils.AlignmentNode] = []
         self._mode = "clado"
         self._ascii_only = False
-        self._scale_x = 1.0
-        self._y_gap = 2
+        self._scale_x = 1.0  # Controls horizontal/vertical scaling.
+        self._x_gap = 6  # Leaf spacing on the horizontal grid.
         self._view_x = 0
         self._view_y = 0
         self._ordered_children: dict[tree_utils.AlignmentNode, list[tree_utils.AlignmentNode]] = {}
@@ -444,6 +444,9 @@ class AsciiPhylo(Static):
         self._content_width = 0
         self._content_height = 0
         self._visual = Text()
+        self._toggle_scope: str = "subtree"  # node | subtree
+        self._bulk_root: tree_utils.AlignmentNode | None = None
+        self._bulk_state: bool | None = None
 
     def set_detail_callback(
         self,
@@ -483,7 +486,36 @@ class AsciiPhylo(Static):
                 return
         self._notify(self._cursor, "Only species leaves under this node.")
 
-    def action_toggle_subtree(self) -> None:
+    def action_toggle_apply(self) -> None:
+        """Toggle apply behavior according to the current scope (single node or subtree)."""
+        if self._toggle_scope == "subtree":
+            self._toggle_subtree()
+        else:
+            self._toggle_single()
+
+    def action_toggle_scope(self) -> None:
+        """Switch scope mode and highlight the current subtree as a cue."""
+        self._toggle_scope = "subtree" if self._toggle_scope == "node" else "node"
+        scope_label = "Subtree" if self._toggle_scope == "subtree" else "Single node"
+        self._rebuild_visual()
+        self.refresh()
+        self._notify(self._cursor, f"Scope switched to: {scope_label}")
+
+    def _toggle_single(self) -> None:
+        if not self._cursor.round:
+            self._notify(self._cursor, "No round on this node; nothing to toggle.")
+            return
+        # If a parent subtree was toggled in bulk, revert it first to avoid mixed states.
+        if self._maybe_revert_bulk(self._cursor):
+            return
+        round_entry = self._cursor.round
+        round_entry.replace_with_ramax = not round_entry.replace_with_ramax
+        state = "RaMAx" if round_entry.replace_with_ramax else "cactus"
+        self._rebuild_visual()
+        self.refresh()
+        self._notify(self._cursor, f"Current round switched to {state}")
+
+    def _toggle_subtree(self) -> None:
         rounds = list(self._cursor.iter_rounds())
         if not rounds:
             self._notify(self._cursor, "No rounds in this subtree can be toggled.")
@@ -491,6 +523,9 @@ class AsciiPhylo(Static):
         target_state = not all(r.replace_with_ramax for r in rounds)
         for round_entry in rounds:
             round_entry.replace_with_ramax = target_state
+        # Track the latest subtree toggle so child toggles can revert it if needed.
+        self._bulk_root = self._cursor if target_state else None
+        self._bulk_state = target_state if target_state else None
         message = (
             f"Toggled {len(rounds)} round(s) to RaMAx"
             if target_state
@@ -498,41 +533,60 @@ class AsciiPhylo(Static):
         )
         self._rebuild_visual()
         self.refresh()
-        self._notify(self._cursor, message)
+        self._notify(self._cursor, f"{message} (scope: subtree)")
 
-    def action_focus_here(self) -> None:
-        if self._cursor is self._root:
-            return
-        self._stack.append(self._root)
-        self._root = self._cursor
-        self._layout()
-        self._notify(self._cursor, "Focused on this subtree.")
+    def _maybe_revert_bulk(self, node: tree_utils.AlignmentNode) -> bool:
+        """If a subtree was toggled to RaMAx and the current node lies within it, revert the bulk change first."""
 
-    def action_focus_back(self) -> None:
-        if not self._stack:
-            return
-        self._root = self._stack.pop()
-        self._layout()
-        self._notify(self._cursor, "Returned to previous view.")
+        if not (self._bulk_root and self._bulk_state):
+            return False
+        if self._bulk_state is not True:
+            return False
+        if node is self._bulk_root:
+            return False
 
-    def action_toggle_mode(self) -> None:
-        self._mode = "phylo" if self._mode == "clado" else "clado"
-        self._layout()
-        self._notify(self._cursor, f"Switched to {self._mode} mode.")
+        # Check whether the node is within the recorded subtree.
+        bulk_nodes = self._collect_subtree_nodes(self._bulk_root)
+        if node not in bulk_nodes:
+            return False
 
-    def action_zoom_in(self) -> None:
-        self._scale_x = min(8.0, self._scale_x * 1.2)
-        self._layout()
+        for round_entry in self._bulk_root.iter_rounds():
+            round_entry.replace_with_ramax = False
 
-    def action_zoom_out(self) -> None:
-        self._scale_x = max(0.3, self._scale_x / 1.2)
-        self._layout()
+        # Clear bulk tracking flags
+        self._bulk_root = None
+        self._bulk_state = None
 
-    def action_toggle_ascii(self) -> None:
-        self._ascii_only = not self._ascii_only
         self._rebuild_visual()
         self.refresh()
-        self._notify(self._cursor, "ASCII mode enabled" if self._ascii_only else "Box drawing restored.")
+        self._notify(
+            node,
+            "Exited subtree-wide RaMAx; the subtree is restored to cactus. Reselect the subtree before enabling nodes individually.",
+        )
+        self._show_revert_modal()
+        return True
+
+    def _show_revert_modal(self) -> None:
+        """Show a modal hint so the notice is not lost."""
+
+        try:
+            app = self.app  # Only available when the Textual app is running; tests may not mount it.
+        except Exception:
+            app = None
+        if app and hasattr(app, "push_screen"):
+            app.push_screen(
+                InfoModal(
+                    "Bulk mode exited",
+                    (
+                        "The RaMAx toggle for that subtree has been reverted to cactus.\n\n"
+                        "Reason: you selected a node inside that subtree while in single-node mode.\n\n"
+                        "To reapply in bulk, switch back to subtree mode (press b) and then press space."
+                    ),
+                )
+            )
+
+    def action_toggle_ascii(self) -> None:
+        pass
 
     def action_open_search(self) -> None:
         prompt = SearchModal(self._search_term or "")
@@ -653,38 +707,50 @@ class AsciiPhylo(Static):
 
         leaf_index = 0
 
-        def assign_y(node: tree_utils.AlignmentNode) -> float:
+        def assign_x(node: tree_utils.AlignmentNode) -> float:
+            """Horizontal layout: leaves are evenly spaced; internal nodes take the mean of their children."""
             nonlocal leaf_index
             children = self._ordered_children.get(node, [])
             if not children:
-                self._y_map[node] = float(leaf_index * self._y_gap)
+                gap = max(3, int(self._x_gap * self._scale_x))
+                self._x_map[node] = float(leaf_index * gap)
                 leaf_index += 1
-                return self._y_map[node]
-            child_ys = [assign_y(child) for child in children]
-            top = min(child_ys)
-            bottom = max(child_ys)
-            self._y_map[node] = (top + bottom) / 2
-            return self._y_map[node]
+                return self._x_map[node]
+            child_xs = [assign_x(child) for child in children]
+            center = sum(child_xs) / len(child_xs)
+            self._x_map[node] = center
+            return center
 
-        assign_y(self._root)
+        assign_x(self._root)
 
-        step = max(3, int(6 * self._scale_x))
-        self._x_map[self._root] = 0
+        self._y_map[self._root] = 0.0
+        base_step = max(3, int(4 * self._scale_x))
+        
+        # Find the longest branch to normalize the visual spacing.
+        max_len = 0.0
+        def find_max_len(node: tree_utils.AlignmentNode) -> None:
+            nonlocal max_len
+            if node.length is not None:
+                max_len = max(max_len, node.length)
+            for child in node.children:
+                find_max_len(child)
+        find_max_len(self._root)
+        self._max_branch_length = max_len if max_len > 0 else 1.0
 
-        def assign_x(node: tree_utils.AlignmentNode) -> None:
-            base = self._x_map[node]
+        def assign_y(node: tree_utils.AlignmentNode) -> None:
+            base_y = self._y_map[node]
             children = self._ordered_children.get(node, [])
             for child in children:
                 if self._mode == "phylo":
                     increment = child.length if child.length is not None else 1.0
                     increment = max(0.1, increment)
                 else:
-                    increment = 2.0
-                delta = max(2, int(increment * step))
-                self._x_map[child] = base + delta
-                assign_x(child)
+                    increment = 1.0
+                delta = max(2, int(math.ceil(base_step * increment)))
+                self._y_map[child] = base_y + delta
+                assign_y(child)
 
-        assign_x(self._root)
+        assign_y(self._root)
 
         self._linear = sorted(
             self._y_map.keys(),
@@ -692,9 +758,9 @@ class AsciiPhylo(Static):
         )
         if self._cursor not in self._linear:
             self._cursor = self._root
-        self._content_width = max(self._x_map.values(), default=0) + 40
+        self._content_width = int(max(self._x_map.values(), default=0)) + 20
         max_y = math.ceil(max(self._y_map.values(), default=0))
-        self._content_height = max_y + 10
+        self._content_height = max_y + 6
         self._ensure_visible(self._cursor)
         self._rebuild_visual()
         self.refresh()
@@ -733,12 +799,12 @@ class AsciiPhylo(Static):
         return {
             "h": "─",
             "v": "│",
-            "tee": "├",
-            "elbow": "└",
-            "top": "┌",
+            "tee": "├─",
+            "elbow": "└─",
+            "top": "┌─",
             "dot": "●",
-            "lite": "◇",
-            "parent": "◎",
+            "lite": "○",
+            "parent": "◈",
         }
 
     def _compute_states(self) -> None:
@@ -790,112 +856,129 @@ class AsciiPhylo(Static):
         return None
 
     def _rebuild_visual(self) -> None:
-        if not self._y_map:
-            self._visual = Text("")
-            return
-        self._compute_states()
-        width = max(40, self.size.width - 2)
-        height = max(10, self.size.height - 2)
         glyphs = self._glyphs()
-        grid = [[" " for _ in range(width)] for _ in range(height)]
-        styles = [["" for _ in range(width)] for _ in range(height)]
-        label_margin = 2
+        highlight_subtree = self._toggle_scope == "subtree"
+        highlighted_nodes: set[tree_utils.AlignmentNode] = set()
+        if highlight_subtree and self._cursor:
+            highlighted_nodes = self._collect_subtree_nodes(self._cursor)
 
-        selected_highlight: set[tree_utils.AlignmentNode] = set()
-        if self._cursor:
-            selected_highlight = self._collect_round_nodes(self._cursor)
-        ramax_highlight: set[tree_utils.AlignmentNode] = {
-            node
-            for node in self._y_map.keys()
-            if node.round and node.round.replace_with_ramax
-        }
+        def label_for(node: tree_utils.AlignmentNode) -> str:
+            """Return the full label text without truncation."""
+            name = node.name or "(unnamed)"
+            parts = [name]
+            if node.round:
+                # Keep round state only; no extra leaf marker.
+                tag = "[RaMAx]" if node.round.replace_with_ramax else "[Cactus]"
+                parts.append(tag)
+            return " ".join(parts)
 
-        def highlight_kind(node: tree_utils.AlignmentNode) -> str | None:
-            if node in selected_highlight:
-                return "selected"
-            if node in ramax_highlight:
-                return "ramax"
-            return None
+        # Connectors use a fixed four-column indent and consistent heavy glyphs.
+        tee = "┣━━ "
+        elbow = "┗━━ "
+        pipe = "┃   "
+        space = "    "
 
-        def highlight_color(kind: str | None, default: str) -> str:
-            if kind == "ramax":
-                return "#fcbf49"
-            if kind == "selected":
-                return "#4cc9f0"
-            return default
+        # Pass 1: Build base lines and calculate max width
+        raw_lines: list[tuple[Text, tree_utils.AlignmentNode]] = []
+        self._x_map.clear()
+        self._y_map.clear()
+        max_width = 0
 
-        def draw_char(x: int, y: int, ch: str, style: str = "") -> None:
-            vx = x - self._view_x
-            vy = y - self._view_y
-            if 0 <= vx < width and 0 <= vy < height:
-                grid[vy][vx] = ch
-                styles[vy][vx] = style
-
-        def draw_branch(parent: tree_utils.AlignmentNode) -> None:
-            px = self._x_map[parent]
-            py = int(round(self._y_map[parent]))
-            children = self._ordered_children.get(parent, [])
-            if children:
-                child_ys = [int(round(self._y_map[child])) for child in children]
-                y0, y1 = min(child_ys), max(child_ys)
-                parent_kind = highlight_kind(parent)
-                vertical_style = highlight_color(parent_kind, "#3c445c")
-                for y in range(y0, y1 + 1):
-                    draw_char(px, y, glyphs["v"], vertical_style)
-                last_index = len(children) - 1
-                for index, child in enumerate(children):
-                    cx = self._x_map[child]
-                    cy = int(round(self._y_map[child]))
-                    if len(children) == 1:
-                        joint = glyphs["elbow"]
-                    elif index == 0:
-                        joint = glyphs.get("top", glyphs["tee"])
-                    elif index == last_index:
-                        joint = glyphs["elbow"]
-                    else:
-                        joint = glyphs["tee"]
-                    child_kind = highlight_kind(child)
-                    joint_kind = self._connector_highlight(parent_kind, child_kind)
-                    connector_style = highlight_color(joint_kind, vertical_style)
-                    draw_char(px, cy, joint, connector_style)
-                    for x in range(min(px + 1, cx), cx + 1):
-                        draw_char(x, cy, glyphs["h"], connector_style)
-                    if self._mode == "clado" and child.length is not None:
-                        text = f"{child.length:.3f}"
-                        available = max(0, cx - px - 1)
-                        if available >= len(text):
-                            start = px + 1 + max(0, (available - len(text)) // 2)
-                            start = min(start, cx - len(text))
-                            for offset, ch in enumerate(text):
-                                draw_char(start + offset, cy, ch, "#6b768f")
-                    draw_branch(child)
-            style = "#ffffff" if parent is self._cursor else self._state_color(parent)
-            style = highlight_color(highlight_kind(parent), style)
-            support = parent.support if parent.support is not None else 100.0
-            if parent.children:
-                node_char = glyphs.get("parent", "◎")
+        def walk(node: tree_utils.AlignmentNode, prefix: str, is_last: bool, depth: int) -> None:
+            connector = "" if depth == 0 else (elbow if is_last else tee)
+            
+            # --- Icon Selection ---
+            if not node.children:
+                # Leaf Node: Nature/Green theme
+                icon = "● " 
             else:
-                node_char = glyphs["dot"] if support >= 70 else glyphs["lite"]
-            draw_char(px, py, node_char, style)
-            label = parent.name or "(unnamed)"
-            label = f"> {label}" if parent is self._cursor else f"  {label}"
-            x0 = px + label_margin
-            for offset, ch in enumerate(label):
-                draw_char(x0 + offset, py, ch, style)
+                # Ancestor Node: Structure/Blue theme
+                icon = "◈ "
 
-        draw_branch(self._root)
-        lines: list[Text] = []
-        for row_chars, row_styles in zip(grid, styles):
+            # --- RaMAx State Indicator (Scheme A) ---
+            indicator_char = "│" # Default
+            indicator_style = "#6272a4" 
+
+            if node.round and node.round.replace_with_ramax:
+                indicator_char = "❚" # Golden bar
+                indicator_style = "#fcbf49"
+
             line = Text()
-            for ch, style in zip(row_chars, row_styles):
-                if style:
-                    line.append(ch, style=style)
+            line.append(indicator_char, style=indicator_style)
+            
+            # Prefix carries the vertical indentation from ancestors; render it with a uniform cool-gray style.
+            line.append(prefix, style="#6272a4")
+            if connector:
+                line.append(connector, style="#6272a4")
+            
+            label_text = label_for(node)
+            display_text_object = Text()
+
+            # --- Scheme A: Cursor Highlight ---
+            if node is self._cursor:
+                # High-contrast background (bright purple) and bold brackets
+                display_text_object.append(f"【 {icon}{label_text} 】", style="bold #1e1e2e on #bd93f9")
+            
+            # --- Scheme A: RaMAx State ---
+            elif node.round and node.round.replace_with_ramax:
+                display_text_object.append(f"{icon}{label_text}", style="bold #1e1e2e on #fcbf49")
+            
+            # --- Scheme A: Subtree Scope Highlight ---
+            elif highlight_subtree and node in highlighted_nodes:
+                if self._ascii_only:
+                    display_text_object.append(f"[ {icon}{label_text} ]", style="bold #1e1e2e on #94a3b8")
                 else:
-                    line.append(ch)
-            line.rstrip()
-            lines.append(line)
-        rendered = Text("\n").join(lines)
-        self._visual = rendered
+                    display_text_object.append(f"〔 {icon}{label_text} 〕", style="bold #1e1e2e on #2d3b55")
+            
+            # --- Default: Leaf vs Ancestor Distinction ---
+            elif not node.children:
+                # Leaf: Green, lighter weight
+                display_text_object.append(f"{icon}{label_text}", style="#a6e3a1") 
+            else:
+                # Ancestor: Blue, Bold
+                display_text_object.append(f"{icon}{label_text}", style="bold #89b4fa")
+            
+            line.append(display_text_object)
+
+            nonlocal max_width
+            max_width = max(max_width, line.cell_len)
+            
+            y = len(raw_lines)
+            x = len(prefix) + (0 if depth == 0 else len(connector))
+            self._x_map[node] = x
+            self._y_map[node] = y
+            raw_lines.append((line, node))
+
+            children = self._ordered_children.get(node, [])
+            for idx, child in enumerate(children):
+                child_is_last = idx == len(children) - 1
+                child_prefix = prefix + (space if is_last else pipe)
+                walk(child, child_prefix, child_is_last, depth + 1)
+
+        walk(self._root, "", True, 0)
+
+        # Pass 2: Add dotted leader and branch length
+        final_lines: list[Text] = []
+        target_width = max_width + 4 # Reserve gap
+
+        for line, node in raw_lines:
+            if node.length is not None:
+                current_len = line.cell_len
+                padding = max(2, target_width - current_len)
+                dots = "." * padding
+                len_str = f" {node.length:.4g}"
+                
+                # Append dotted leader and length
+                line.append(dots, style="#6272a4")
+                line.append(len_str, style="bold cyan")
+            final_lines.append(line)
+
+        self._linear = sorted(self._y_map.keys(), key=lambda n: (self._y_map[n], self._x_map[n]))
+        self._content_height = len(final_lines)
+        self._content_width = max((len(t.plain) for t in final_lines), default=0)
+        self._view_x = 0
+        self._view_y = 0
+        self._visual = Text("\n").join(final_lines)
 
     def render(self) -> Text:  # type: ignore[override]
         return self._visual
@@ -985,6 +1068,395 @@ class DetailBuffer:
         else:
             summary_plain = ""
         self.app.sub_title = summary_plain[:80]
+
+
+class DashboardHUD(Static):
+    """Bottom HUD panel that shows the current node status and summary."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._current_node: tree_utils.AlignmentNode | None = None
+        self._metrics: dict[str, object] = {}
+        self._gpu_disabled = False
+        self._spinner = itertools.cycle("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+
+    def on_mount(self) -> None:  # type: ignore[override]
+        # Warm up CPU sampling so the first reading is not zero.
+        try:
+            psutil.cpu_percent(interval=None)
+        except Exception:
+            pass
+        self._metrics = self._collect_metrics()
+        self.update(self._render_empty())
+        self.set_interval(1.0, self._refresh_metrics)
+
+    def update_node(self, node: tree_utils.AlignmentNode) -> None:
+        self._current_node = node
+        self.update(self._render_dashboard(node))
+
+    def update_node_placeholder(self, renderable: RenderableType | str) -> None:
+        self._current_node = None
+        self.update(renderable)
+
+    def update_message(self, renderable: RenderableType | str) -> None:
+        self.update(renderable)
+
+    def _refresh_metrics(self) -> None:
+        self._metrics = self._collect_metrics()
+        if self._current_node:
+            self.update(self._render_dashboard(self._current_node))
+
+    def _render_empty(self) -> Panel:
+        return Panel(Align.center("Waiting for selection...", vertical="middle"), title="System Status")
+
+    def _draw_bar(self, percentage: float, width: int = 15, color: str = "blue") -> Text:
+        percentage = max(0.0, min(1.0, percentage))
+        filled_len = int(percentage * width)
+        bar = "❚" * filled_len + "·" * (width - filled_len)
+        return Text(bar, style=color)
+
+    def _info_block(self, label: str, body: RenderableType, *, accent: str = "white") -> RenderableType:
+        title = Text(label, style=f"bold {accent}")
+        return Group(title, body)
+
+    def _subtree_stats(self, node: tree_utils.AlignmentNode) -> dict[str, object]:
+        rounds = list(node.iter_rounds())
+        total_rounds = len(rounds)
+        ramax_rounds = sum(1 for r in rounds if r.replace_with_ramax)
+        hal2fasta = sum(len(r.hal2fasta_steps) for r in rounds)
+
+        def _depth(n: tree_utils.AlignmentNode) -> int:
+            if not n.children:
+                return 1
+            return 1 + max(_depth(c) for c in n.children)
+
+        def _leaves(n: tree_utils.AlignmentNode) -> int:
+            if not n.children:
+                return 1
+            return sum(_leaves(c) for c in n.children)
+
+        jobstore = None
+        for r in rounds:
+            for step in (r.blast_step, r.align_step):
+                if step and step.jobstore:
+                    jobstore = step.jobstore
+                    break
+            if jobstore:
+                break
+        return {
+            "total_rounds": total_rounds,
+            "ramax_rounds": ramax_rounds,
+            "hal2fasta": hal2fasta,
+            "leaves": _leaves(node),
+            "depth": _depth(node),
+            "jobstore": jobstore,
+        }
+
+    def _render_dashboard(self, node: tree_utils.AlignmentNode) -> Table:
+        # Mode and theme color
+        if node.round:
+            if node.round.replace_with_ramax:
+                mode_icon = "⚡"
+                mode_name = "RaMAx Accelerated"
+                theme_color = "yellow"
+            else:
+                mode_icon = "🌵"
+                mode_name = "Cactus Classic"
+                theme_color = "cyan"
+            file_type = "HAL"
+            target_file = Path(node.round.target_hal).name
+        else:
+            mode_icon = "🌿"
+            mode_name = "Leaf Genome"
+            theme_color = "green"
+            file_type = "FASTA"
+            target_file = node.name or "(leaf)"
+
+        base_dir = getattr(self.app, "base_dir", Path.cwd())
+        grid = Table.grid(expand=True, padding=(0, 2))
+        grid.add_column(ratio=1)
+        grid.add_column(ratio=2)
+        grid.add_column(ratio=1)
+
+        # --- Left column: identity card ---
+        id_table = Table.grid(expand=True, padding=(0, 1))
+        id_table.add_column(justify="right", style="dim #6272a4", width=8)
+        id_table.add_column(justify="left", ratio=1)
+
+        # Row 1: Node Name
+        id_table.add_row("Node", Text(f"{mode_icon} {node.name or 'Unknown'}", style="bold white"))
+        
+        # Row 2: Parent & Length
+        parent_name = node.parent.name if getattr(node, "parent", None) else "None (Root)"
+        length_val = getattr(node, "length", None)
+        length_str = f"{length_val:.4g}" if length_val is not None else "-"
+        
+        meta_info = Text.assemble(
+            (parent_name, "white"),
+            ("  Len: ", "dim #6272a4"),
+            (length_str, "cyan")
+        )
+        id_table.add_row("Parent", meta_info)
+
+        # Row 3: Mode
+        id_table.add_row("Mode", Text(mode_name, style=theme_color))
+        
+        # Output Check
+        out_status = "white"
+        out_info = ""
+        if node.round and node.round.target_hal:
+            out_path = base_dir / node.round.target_hal
+            if out_path.exists():
+                 out_status = "green"
+                 try:
+                     size = out_path.stat().st_size
+                     for unit in ["B", "KB", "MB", "GB", "TB"]:
+                         if size < 1024:
+                             break
+                         size /= 1024
+                     out_info = f" ({size:.1f}{unit})"
+                 except Exception:
+                     out_info = " (Ready)"
+            else:
+                 out_status = "dim white"
+                 out_info = " (Pending)"
+        
+        # Row 4: Output File
+        id_table.add_row("Output", Text(f"{target_file}{out_info}", overflow="ellipsis", style=out_status))
+
+        # Row 5: Workdir / Root
+        if node.round:
+            wd_status = "white"
+            if node.round.workdir:
+                wd_path = base_dir / node.round.workdir
+                if wd_path.exists() and wd_path.is_dir():
+                    wd_status = "green"
+                else:
+                    wd_status = "dim white"
+            workdir_text = node.round.workdir or "N/A"
+            id_table.add_row("Workdir", Text(workdir_text, overflow="ellipsis", style=wd_status))
+            
+            if node.round.manual_ramax_command:
+                id_table.add_row("Custom", Text("Manual Command Set", style="bold yellow"))
+
+        identity_panel = Panel(id_table, title="[Identity]", border_style=f"dim {theme_color}", padding=(0, 1), height=11)
+
+        # --- Middle column: statistics overview ---
+        stats = self._subtree_stats(node)
+        
+        # Get whole-tree statistics
+        total_stats = stats
+        if hasattr(self.app, "alignment_tree") and self.app.alignment_tree:
+             total_stats = self._subtree_stats(self.app.alignment_tree.root)
+
+        def _make_section(title: str, data: dict, color: str) -> RenderableType:
+             cov = (data["ramax_rounds"] / data["total_rounds"]) if data["total_rounds"] else 0.0
+             # Dynamically adjust progress-bar width
+             mid_width = max(20, self.size.width // 3)
+             bar_w = max(6, min(15, mid_width - 22))
+             
+             bar = self._metric_bar(cov * 100, bar_width=bar_w, accent=color)
+             cov_txt = f"{data['ramax_rounds']}/{data['total_rounds']}"
+             
+             # First line: title + progress bar + value
+             header = Table.grid(expand=True, padding=(0, 1))
+             header.add_column(style=f"bold {color}", width=8)
+             header.add_column()
+             header.add_column(justify="right", width=len(cov_txt))
+             header.add_row(title, bar, Text(cov_txt, style="white"))
+             
+             # Second line: detail metrics
+             details = Text.assemble(
+                 ("Leaves: ", "dim #6272a4"), (str(data['leaves']), "white"), "  ",
+                 ("Depth: ", "dim #6272a4"), (str(data['depth']), "white"), "  ",
+                 ("H2F: ", "dim #6272a4"), (str(data['hal2fasta']), "white")
+             )
+             return Group(header, details)
+
+        sub_group = _make_section("Subtree", stats, "yellow")
+        tot_group = _make_section("Total", total_stats, "cyan")
+        
+        # Combine sections with an empty line in between
+        content = Group(sub_group, Text(" "), tot_group)
+        
+        config_panel = Panel(content, title="[Statistics]", border_style="dim white", padding=(0, 1), height=11)
+
+        # Right column: live system metrics
+        metrics_panel = self._render_metrics_panel()
+
+        grid.add_row(identity_panel, config_panel, metrics_panel)
+        return grid
+
+    def _render_metrics_panel(self) -> Panel:
+        metrics = self._metrics or {}
+        cpu_percent = metrics.get("cpu_percent")
+        mem = metrics.get("mem")
+        gpus = metrics.get("gpus")
+        disk = metrics.get("disk")
+        spinner = next(self._spinner)
+
+        # Adjust bar width to work on narrow terminals.
+        right_width = max(30, self.size.width // 3)
+        bar_width = max(10, min(30, right_width - 10))
+
+        blocks: list[RenderableType] = []
+
+        blocks.append(
+            self._metric_block("CPU", cpu_percent, f"{cpu_percent:.0f}%" if isinstance(cpu_percent, (int, float)) else "-", "cyan", bar_width)
+        )
+
+        if isinstance(mem, dict):
+            m_percent = mem.get("percent", 0.0)
+            used = mem.get("used_gb")
+            total = mem.get("total_gb")
+            usage = f"{used:.1f}/{total:.1f} GB" if used is not None and total is not None else ""
+            blocks.append(
+                self._metric_block("Memory", m_percent, f"{m_percent:.0f}% {usage}".strip(), "green", bar_width)
+            )
+        else:
+            blocks.append(self._metric_block("Memory", None, "N/A", "green", bar_width))
+
+        if isinstance(gpus, list) and gpus:
+            gpu = gpus[0]
+            g_util = gpu.get("util", 0.0)
+            g_mem_percent = gpu.get("mem_percent", 0.0)
+            g_mem = f"{gpu.get('mem_used', 0):.1f}/{gpu.get('mem_total', 0):.1f} GB"
+            detail = f"{g_util:.0f}% {g_mem} ({g_mem_percent:.0f}%)"
+            blocks.append(self._metric_block("GPU", g_util, detail, "yellow", bar_width))
+        else:
+            blocks.append(self._metric_block("GPU", None, "Not detected", "yellow", bar_width))
+
+        if isinstance(disk, dict):
+            d_percent = disk.get("percent", 0.0)
+            d_text = f"{d_percent:.0f}% {disk.get('used_gb', 0):.1f}/{disk.get('total_gb', 0):.1f} GB"
+            blocks.append(self._metric_block("Disk", d_percent, d_text, "magenta", bar_width))
+
+        table = Table.grid(padding=(0, 0), expand=True)
+        table.add_column(ratio=1)
+        for block in blocks:
+            table.add_row(block)
+
+        title = Text.assemble(
+            ("[Live] ", "dim"),
+            ("System resources ", "white"),
+            (spinner, "cyan"),
+        )
+        return Panel(table, title=title, border_style="bright_blue", padding=(0, 1), height=11)
+
+    def _bar_color(self, percent: float) -> str:
+        if percent >= 85:
+            return "red"
+        if percent >= 60:
+            return "yellow"
+        return "green"
+
+    def _metric_bar(self, percent: float | None, bar_width: int = 22, accent: str = "green") -> Text:
+        if percent is None:
+            return Text("N/A", style="dim")
+        pct = max(0.0, min(100.0, float(percent)))
+        return self._draw_bar(pct / 100.0, width=bar_width, color=self._bar_color(pct))
+
+    def _metric_block(
+        self,
+        label: str,
+        percent: float | None,
+        detail: str,
+        accent: str,
+        bar_width: int,
+    ) -> RenderableType:
+        title = Text(label, style=f"bold {accent}")
+        bar = self._metric_bar(percent, bar_width=bar_width, accent=accent)
+        value = Text(detail, style="white")
+        bar_line = Text.assemble(bar, "  ", value, no_wrap=True)
+        return Group(title, bar_line)
+
+    def _metric_text(self, percent: float | None, suffix: str = "") -> Text:
+        if percent is None:
+            return Text("-", style="dim")
+        return Text(f"{percent:4.0f}{suffix}", style="white")
+
+    def _collect_metrics(self) -> dict[str, object]:
+        data: dict[str, object] = {}
+        try:
+            cpu_percent = psutil.cpu_percent(interval=None)
+            data["cpu_percent"] = cpu_percent
+        except Exception:
+            pass
+
+        try:
+            mem = psutil.virtual_memory()
+            data["mem"] = {
+                "percent": mem.percent,
+                "used_gb": mem.used / (1024**3),
+                "total_gb": mem.total / (1024**3),
+            }
+        except Exception:
+            pass
+
+        try:
+            disk = psutil.disk_usage(Path.cwd())
+            data["disk"] = {
+                "percent": disk.percent,
+                "used_gb": disk.used / (1024**3),
+                "total_gb": disk.total / (1024**3),
+            }
+        except Exception:
+            pass
+
+        gpu_stats = self._collect_gpu_metrics()
+        if gpu_stats:
+            data["gpus"] = gpu_stats
+        return data
+
+    def _collect_gpu_metrics(self) -> list[dict[str, float]] | None:
+        if self._gpu_disabled:
+            return None
+        if shutil.which("nvidia-smi") is None:
+            self._gpu_disabled = True
+            return None
+        try:
+            result = subprocess.run(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=utilization.gpu,memory.used,memory.total",
+                    "--format=csv,noheader,nounits",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=0.3,
+                check=True,
+            )
+        except (subprocess.SubprocessError, FileNotFoundError):
+            self._gpu_disabled = True
+            return None
+
+        gpus: list[dict[str, float]] = []
+        for line in result.stdout.splitlines():
+            if not line.strip():
+                continue
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 3:
+                continue
+            try:
+                util = float(parts[0])
+                mem_used = float(parts[1])
+                mem_total = float(parts[2])
+            except ValueError:
+                continue
+            mem_percent = (mem_used / mem_total * 100) if mem_total else 0.0
+            gpus.append(
+                {
+                    "util": util,
+                    "mem_used": mem_used / 1024 if mem_used else 0.0,
+                    "mem_total": mem_total / 1024 if mem_total else 0.0,
+                    "mem_percent": mem_percent,
+                }
+            )
+
+        if not gpus:
+            self._gpu_disabled = True
+            return None
+        return gpus
 
 class RunSettingsScreen(Screen[RunSettings | None]):
     """Dedicated screen for confirming run-time configuration."""
@@ -1359,25 +1831,76 @@ class RamaxOptionsModal(ModalScreen[tuple[list[str], list[str]] | None]):
 
 class PlanUIApp(App[UIResult]):
     CSS = """
+    /* Deep Space HUD theme */
+    $bg-deep: #0f111a;
+    $bg-panel: #1a1d2e;
+    $border-bright: #444b6a;
+    $text-main: #e0def4;
+    $accent-gold: #f6c177;
+    $accent-blue: #9ccfd8;
+    $accent-green: #31748f;
+
     Screen {
         layout: vertical;
         min-height: 0;
+        background: $bg-deep;
+        color: $text-main;
     }
-    #main {
-        width: 100%;
+    #tree-container {
         height: 1fr;
-        min-height: 0;
-        padding: 0 1;
+        width: 100%;
+        background: $bg-deep;
+        overflow: hidden;
     }
-    #ascii-phylo, #ascii-phylo-empty {
+    AsciiPhylo {
         width: 100%;
-        height: 1fr;
+        height: 100%;
+        background: $bg-deep;
+        padding: 1 2;
     }
     #ascii-phylo-empty {
         align: center middle;
-        color: $text-muted;
+        color: #6b768f;
+    }
+    DashboardHUD {
+        dock: bottom;
+        height: 13;
+        width: 100%;
+        background: $bg-panel;
+        border-top: heavy $border-bright;
     }
     #editor-command { height: 10; }
+
+    ModalScreen {
+        background: rgba(0, 0, 0, 0.6);
+        align: center middle;
+    }
+    #picker-dialog, #editor-dialog, #info-dialog, #search-dialog, #round-picker, #options-dialog, #run-form {
+        border: thick $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+    Input {
+        background: $bg-panel;
+        border: none;
+        color: $text-main;
+    }
+    Input:focus {
+        border: tall $accent-blue;
+    }
+    Button {
+        border: none;
+        background: $bg-panel;
+        color: $text-main;
+    }
+    Button:hover {
+        background: $accent-blue;
+        color: #111;
+    }
+    Button.variant-success {
+        background: #a6e3a1;
+        color: #111;
+    }
     """
 
     BINDINGS = [
@@ -1393,43 +1916,61 @@ class PlanUIApp(App[UIResult]):
         self.base_dir = Path(base_dir) if base_dir else Path.cwd()
         self.alignment_tree = tree_utils.build_alignment_tree(plan, base_dir=self.base_dir)
         self.canvas: AsciiPhylo | None = None
-        self.detail_panel: DetailBuffer | None = None
         self.run_settings = run_settings or RunSettings()
+        self.hud: DashboardHUD | None = None
+        self._last_detail_text: str = ""
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with Container(id="main"):
+        with Container(id="tree-container"):
             if self.alignment_tree:
                 canvas = AsciiPhylo(self.alignment_tree.root)
-                canvas.set_detail_callback(self._show_alignment_node)
+                canvas.set_detail_callback(self._on_node_selected)
                 self.canvas = canvas
                 yield canvas
             else:
                 yield Static("Alignment tree not found; nothing to render.", id="ascii-phylo-empty")
+        hud = DashboardHUD()
+        self.hud = hud
+        yield hud
         yield Footer()
 
     def on_mount(self) -> None:
         self.detail_panel = DetailBuffer(self)
         if self.canvas:
             self.canvas.focus()
-            self._show_alignment_node(self.canvas.current_node())
+            self._on_node_selected(self.canvas.current_node())
         else:
             preview = plan_overview(self.plan, run_settings=self.run_settings, compact=self._is_compact())
             self.detail_panel.update(preview)
+        
+        # Delay the welcome overlay slightly so the UI renders first.
+        self.set_timer(0.3, self._show_welcome_guide)
+
+    def _show_welcome_guide(self) -> None:
+        welcome_text = (
+            "Welcome to the Cactus-RaMAx Planner!\n\n"
+            "This interactive UI allows you to inspect and configure the phylogenetic alignment plan.\n\n"
+            "• [bold]Navigation[/]: Use Arrow keys or h/j/k/l to browse the tree.\n"
+            "• [bold]Toggle RaMAx[/]: Press [bold]SPACE[/] on a node to enable/disable acceleration.\n"
+            "• [bold]Edit[/]: Press [bold]Enter[/] or [bold]E[/] to customize commands and options.\n"
+            "• [bold]Search[/]: Press [bold]/[/] to find species or nodes.\n"
+            "• [bold]Run[/]: Press [bold]R[/] to review settings and start execution.\n"
+        )
+        self.push_screen(InfoModal("Quick Start Guide", welcome_text))
 
     def _is_compact(self) -> bool:
         return self.size.width <= 100
 
     def action_show_info(self) -> None:
-        if not self.detail_panel:
-            return
-        content = self.detail_panel.text or "(empty)"
+        content = self._last_detail_text or "(empty)"
         self.push_screen(InfoModal("Current node details", content))
 
     def action_edit_round(self) -> None:
         if not self.plan.rounds:
-            if self.detail_panel:
-                self.detail_panel.update("No rounds found in this plan.")
+            self._last_detail_text = "No rounds found in this plan."
+            if self.hud:
+                self.hud.update_message(self._last_detail_text)
             return
         node_round = None
         if self.canvas:
@@ -1453,8 +1994,9 @@ class PlanUIApp(App[UIResult]):
         round_entry = self.plan.rounds[round_index]
         targets = self._gather_command_targets(round_entry)
         if not targets:
-            if self.detail_panel:
-                self.detail_panel.update("No editable commands for this round.")
+            self._last_detail_text = "No editable commands for this round."
+            if self.hud:
+                self.hud.update_message(self._last_detail_text)
             return
         if len(targets) == 1:
             self._open_command_editor(round_index, targets[0])
@@ -1480,8 +2022,10 @@ class PlanUIApp(App[UIResult]):
         )
         lines = [cmd.shell_preview() for cmd in commands]
         output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        if notify_detail and self.detail_panel:
-            self.detail_panel.update(f"[green]Commands saved to {output_path}[/green]")
+        if notify_detail:
+            self._last_detail_text = f"[green]Commands saved to {output_path}[/green]"
+            if self.hud:
+                self.hud.update_message(self._last_detail_text)
         return output_path
 
     def action_quit(self) -> None:
@@ -1517,13 +2061,17 @@ class PlanUIApp(App[UIResult]):
         return f"Global: {global_summary}\nRound: {round_summary}"
 
     def _show_round(self, index: int, status: str | None = None) -> None:
-        if not self.detail_panel or index >= len(self.plan.rounds):
+        if index >= len(self.plan.rounds):
             return
         round_entry = self.plan.rounds[index]
         details = self._round_details(round_entry)
         if status:
             details.extend(["", f"[green]{status}[/green]"])
-        self.detail_panel.update("\n".join(details))
+        border_style = "green" if round_entry.replace_with_ramax else "cyan"
+        panel = Panel("\n".join(details), title=round_entry.name, border_style=border_style, padding=(1, 1))
+        self._last_detail_text = "\n".join(details)
+        if self.hud:
+            self.hud.update_message(panel)
 
     def _gather_command_targets(self, round_entry: Round) -> list[CommandTarget]:
         targets: list[CommandTarget] = [
@@ -1584,8 +2132,6 @@ class PlanUIApp(App[UIResult]):
         node: tree_utils.AlignmentNode,
         status: str | None = None,
     ) -> None:
-        if not self.detail_panel:
-            return
         details: list[str] = []
         if node.round:
             details.extend(self._round_details(node.round))
@@ -1605,12 +2151,22 @@ class PlanUIApp(App[UIResult]):
             details.extend(["", "No cactus rounds in this subtree (leaf node)."])
         if status:
             details.extend(["", f"[green]{status}[/green]"])
-        self.detail_panel.update("\n".join(details))
+        self._last_detail_text = "\n".join(details)
+        if self.hud:
+            self.hud.update_message(Panel(self._last_detail_text, title=node.round.name if node.round else (node.name or "Node"), border_style="green" if node.round and node.round.replace_with_ramax else "cyan", padding=(1, 1)))
 
     def _handle_command_selection(self, round_index: int, target: CommandTarget | None) -> None:
         if target is None:
             return
         self._open_command_editor(round_index, target)
+
+    def _on_node_selected(
+        self, node: tree_utils.AlignmentNode, status: str | None = None
+    ) -> None:
+        """Tree navigation callback that drives HUD updates."""
+        self._show_alignment_node(node, status=status)
+        if self.hud:
+            self.hud.update_node(node)
 
     def _open_command_editor(self, round_index: int, target: CommandTarget) -> None:
         if target.kind == "ramax-options":

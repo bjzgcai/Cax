@@ -2,11 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.3.0-dev] - Unreleased
+## [0.3.0] - 2025-11-25
 
 ### UI
 - Rebuilt the alignment browser as an ASCII phylogenetic canvas with clado/phylo modes, proportional branch spacing, subtree focus/return, and RaMAx toggles that repaint the tree in place without the old Textual tree widget.
 - Added search (`/`, `n` / `Shift+N`), zoom, ASCII glyph fallback, and a detail buffer/info modal so large trees stay navigable and summaries remain visible even on narrow terminals.
+
+### Planner
+- Skip RaMAx rounds whose ancestors already run with RaMAx, while still honoring cactus overrides inside those subtrees so users can mix modes intentionally.
+- Suppress `halAppendSubtree` merges when the parent round output was produced by RaMAx, preventing redundant HAL writes.
 
 ### Tree parsing
 - Alignment nodes now retain branch lengths, support values, and parent links, enabling proportional layouts and state colouring while tolerating unlabeled or missing edges.
@@ -16,7 +20,7 @@ All notable changes to this project will be documented in this file.
 - Moved the plan overview/environment rendering helpers into `cax.ui` (retiring `cax.render`) and pointed CLI previews at the shared UI renderer for consistent output and script exports.
 
 ### Tests
-- Removed the outdated planner-skips and tree-utils tests pending replacement after the parser/UI overhaul.
+- Added coverage for RaMAx ancestor/descendant overrides in the planner and for bulk RaMAx subtree reversion when toggling individual nodes in the UI.
 
 ## [0.2.2] - 2025-11-08
 

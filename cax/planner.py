@@ -38,9 +38,7 @@ def build_execution_plan(
 
     base_dir = base_dir or Path.cwd()
     commands: list[PlannedCommand] = []
-
     tree = tree_utils.build_alignment_tree(plan, base_dir=base_dir)
-    skip_roots = _compute_skipped_roots(plan, tree)
 
     for step in plan.preprocess:
         commands.append(
@@ -53,12 +51,13 @@ def build_execution_plan(
         )
 
     for round_entry in plan.rounds:
-        if round_entry.root in skip_roots:
+        if _is_descendant_ramax(round_entry, tree):
+            # An ancestor already uses RaMAx; running it again here would be redundant.
             continue
         commands.extend(_round_commands(plan, round_entry, base_dir, thread_count))
 
     for step in plan.hal_merges:
-        if step.root and step.root in skip_roots:
+        if _skip_halmerge_for_ramax_parent(step, tree):
             continue
         commands.append(
             _from_step(
@@ -288,19 +287,34 @@ def _has_flag(command: List[str], flag: str) -> bool:
     return False
 
 
-def _compute_skipped_roots(plan: Plan, tree: Optional[tree_utils.AlignmentTree]) -> set[str]:
-    if tree is None:
-        return set()
+def _is_descendant_ramax(round_entry: Round, tree: Optional[tree_utils.AlignmentTree]) -> bool:
+    """Skip this round when any ancestor round already uses RaMAx and this round also requests RaMAx, avoiding duplicate alignments."""
 
-    skipped: set[str] = set()
-    for round_entry in plan.rounds:
-        node = tree.find(round_entry.root)
-        if not node:
-            continue
-        ancestor = node.parent
-        while ancestor:
-            if ancestor.round and ancestor.round.replace_with_ramax:
-                skipped.add(round_entry.root)
-                break
-            ancestor = ancestor.parent
-    return skipped
+    if tree is None or not round_entry.replace_with_ramax:
+        return False
+    node = tree.find(round_entry.root)
+    if node is None:
+        return False
+    ancestor = node.parent
+    while ancestor:
+        if ancestor.round and ancestor.round.replace_with_ramax:
+            return True
+        ancestor = ancestor.parent
+    return False
+
+
+def _skip_halmerge_for_ramax_parent(step: Step, tree: Optional[tree_utils.AlignmentTree]) -> bool:
+    """Skip halAppendSubtree when its parent round was produced by RaMAx to avoid writing HAL twice."""
+
+    if tree is None or step.root is None:
+        return False
+    node = tree.find(step.root)
+    if node is None:
+        return False
+    # Find the nearest ancestor with a round; that node is the halmerge target parent.
+    parent = node.parent
+    while parent and parent.round is None:
+        parent = parent.parent
+    if parent and parent.round and parent.round.replace_with_ramax:
+        return True
+    return False
