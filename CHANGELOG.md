@@ -5,8 +5,11 @@ All notable changes to this project will be documented in this file.
 ## [0.3.0] - 2025-11-25
 
 ### UI
-- Rebuilt the alignment browser as an ASCII phylogenetic canvas with clado/phylo modes, proportional branch spacing, subtree focus/return, and RaMAx toggles that repaint the tree in place without the old Textual tree widget.
-- Added search (`/`, `n` / `Shift+N`), zoom, ASCII glyph fallback, and a detail buffer/info modal so large trees stay navigable and summaries remain visible even on narrow terminals.
+- Rebuilt the alignment browser as an ASCII phylogenetic canvas with proportional branch spacing, inline RaMAx/cactus colouring, and in-place repainting without the old Textual tree widget.
+- Added scope switching between subtree and single-node toggles (key `b`), plus bulk-revert safeguards with modal hints so mixed cactus/RaMAx edits stay consistent.
+- Added search (`/`, `n` / `Shift+N`), dotted branch-length annotations, ASCII glyph fallback, and a detail buffer/info modal so large trees stay navigable and summaries remain visible even on narrow terminals.
+- Introduced a bottom Dashboard HUD that mirrors the current node, subtree/total RaMAx coverage, and live CPU/GPU/memory/disk metrics; keeps summaries readable on narrow terminals.
+- Display a short welcome/quick-start overlay after mount to highlight navigation, toggles, and run flow for new users.
 
 ### Planner
 - Skip RaMAx rounds whose ancestors already run with RaMAx, while still honoring cactus overrides inside those subtrees so users can mix modes intentionally.
