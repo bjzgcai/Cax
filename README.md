@@ -1,6 +1,6 @@
 # Cactus-RaMAx
 
-Cactus-RaMAx helps you remix alignment plans emitted by `cactus-prepare`. You can inspect every round, toggle RaMAx for any subtree, and then run or export the resulting command list. Version `0.3.0` introduces an ASCII phylogenetic canvas with subtree/single-node toggle scopes, search, proportional branch spacing, and a bottom HUD that summarizes the current node, coverage, and live system metrics.
+Cactus-RaMAx helps you remix alignment plans emitted by `cactus-prepare`. You can inspect every round, toggle RaMAx for any subtree, and then run or export the resulting command list. The current development version (`0.4.0-dev`) keeps the ASCII phylogenetic canvas with subtree/single-node toggle scopes, search, proportional branch spacing, and a bottom HUD that summarizes the current node, coverage, and live system metrics. Subtree Mode now adds a `--subtree-mode` flag, disables descendant RaMAx automatically, and gracefully reverts if you later edit a child node.
 
 ## Environment setup
 
@@ -51,7 +51,7 @@ cax
 - The left pane renders an ASCII phylogenetic canvas with proportional branch spacing; use arrow keys or **h/j/k/l** to move, press **Space** to toggle RaMAx using the current scope, and press **b** to switch the scope between subtree and single node. Press **/** to search node names, then **n** / **Shift+N** to cycle through matches.
 - The canvas paints cactus vs. RaMAx states inline, annotates branch lengths on dotted leaders, and shows a bottom HUD with identity, subtree/total RaMAx coverage, and live CPU/GPU/memory/disk metrics. Press **i** for a full detail modal of the current node.
 - `E`: edit commands for the selected round or RaMAx replacement in a multi-line editor (press **Ctrl+S** to save).
-- `R`: open the Run Settings screen to review verbose logging and the shared thread count, run the plan, or save the generated command list. The screen keeps a live plan summary and is fully keyboard-driven (`Tab` / `Shift+Tab`, **Ctrl+Enter**, **V**).
+- `R`: open the Run Settings screen to review verbose logging and the shared thread count, run the plan, or save the generated command list. The screen is fully keyboard-driven (`Tab` / `Shift+Tab`, **Ctrl+Enter**, **V**), and **F6** switches between the classic plan overview and a new flow view that renders the execution dependency tree in ASCII.
 - `Q`: quit the UI.
 - Verbose streaming is only controlled via the run-settings dialog so you can review the choice right before execution.
 

@@ -22,6 +22,7 @@ from rich.console import Console, Group, RenderableType
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
+from rich.tree import Tree
 from rich.align import Align
 from rich.console import Group
 
@@ -508,82 +509,120 @@ class AsciiPhylo(Static):
         # If a parent subtree was toggled in bulk, revert it first to avoid mixed states.
         if self._maybe_revert_bulk(self._cursor):
             return
+            
         round_entry = self._cursor.round
+        
+        # Remove subtree flag if present (switching from Subtree -> Node mode effectively)
+        if "--subtree-mode" in round_entry.ramax_opts:
+            round_entry.ramax_opts.remove("--subtree-mode")
+            
         round_entry.replace_with_ramax = not round_entry.replace_with_ramax
-        state = "RaMAx" if round_entry.replace_with_ramax else "cactus"
+        state = "RaMAx (Node)" if round_entry.replace_with_ramax else "cactus"
         self._rebuild_visual()
         self.refresh()
         self._notify(self._cursor, f"Current round switched to {state}")
 
     def _toggle_subtree(self) -> None:
-        rounds = list(self._cursor.iter_rounds())
-        if not rounds:
-            self._notify(self._cursor, "No rounds in this subtree can be toggled.")
+        """
+        Toggle Subtree Mode (Mode B):
+        - Enable RaMAx for this node.
+        - Add '--subtree-mode' flag.
+        - Disable RaMAx for all descendant nodes (as they are subsumed).
+        """
+        if not self._cursor.round:
+            self._notify(self._cursor, "No round on this node to apply subtree mode.")
             return
-        target_state = not all(r.replace_with_ramax for r in rounds)
-        for round_entry in rounds:
-            round_entry.replace_with_ramax = target_state
-        # Track the latest subtree toggle so child toggles can revert it if needed.
-        self._bulk_root = self._cursor if target_state else None
-        self._bulk_state = target_state if target_state else None
-        message = (
-            f"Toggled {len(rounds)} round(s) to RaMAx"
-            if target_state
-            else f"Restored {len(rounds)} round(s) to cactus"
-        )
+            
+        round_entry = self._cursor.round
+        
+        # Check if currently enabled as subtree
+        is_subtree_active = round_entry.replace_with_ramax and "--subtree-mode" in round_entry.ramax_opts
+        
+        target_state = not is_subtree_active
+        
+        if target_state:
+            # Enable Subtree Mode
+            round_entry.replace_with_ramax = True
+            if "--subtree-mode" not in round_entry.ramax_opts:
+                round_entry.ramax_opts.append("--subtree-mode")
+            
+            # Disable all descendants
+            descendants = self._collect_round_nodes(self._cursor)
+            count_disabled = 0
+            for desc in descendants:
+                if desc is self._cursor: continue
+                if desc.round and desc.round.replace_with_ramax:
+                    desc.round.replace_with_ramax = False
+                    # Also clean their subtree flags if any
+                    if "--subtree-mode" in desc.round.ramax_opts:
+                        desc.round.ramax_opts.remove("--subtree-mode")
+                    count_disabled += 1
+            
+            msg = f"Enabled Subtree RaMAx. Overridden {count_disabled} descendant(s)."
+        else:
+            # Disable Subtree Mode
+            round_entry.replace_with_ramax = False
+            if "--subtree-mode" in round_entry.ramax_opts:
+                round_entry.ramax_opts.remove("--subtree-mode")
+            msg = "Disabled Subtree RaMAx."
+
         self._rebuild_visual()
         self.refresh()
-        self._notify(self._cursor, f"{message} (scope: subtree)")
+        self._notify(self._cursor, msg)
 
     def _maybe_revert_bulk(self, node: tree_utils.AlignmentNode) -> bool:
-        """If a subtree was toggled to RaMAx and the current node lies within it, revert the bulk change first."""
-
-        if not (self._bulk_root and self._bulk_state):
+        """
+        Check if any ancestor is in Subtree Mode. If so, disable that mode to allow node-level edits.
+        Returns True if an ancestor was modified (reverted), signaling the caller to stop.
+        """
+        current = getattr(node, "parent", None)
+        ancestor_conflict: tree_utils.AlignmentNode | None = None
+        
+        while current:
+            if current.round and current.round.replace_with_ramax:
+                if "--subtree-mode" in current.round.ramax_opts:
+                    ancestor_conflict = current
+                    break
+            current = getattr(current, "parent", None)
+            
+        if not ancestor_conflict:
             return False
-        if self._bulk_state is not True:
-            return False
-        if node is self._bulk_root:
-            return False
 
-        # Check whether the node is within the recorded subtree.
-        bulk_nodes = self._collect_subtree_nodes(self._bulk_root)
-        if node not in bulk_nodes:
-            return False
-
-        for round_entry in self._bulk_root.iter_rounds():
-            round_entry.replace_with_ramax = False
-
-        # Clear bulk tracking flags
-        self._bulk_root = None
-        self._bulk_state = None
+        # Revert the ancestor's Subtree Mode
+        if ancestor_conflict.round:
+            ancestor_conflict.round.ramax_opts.remove("--subtree-mode")
+            # Option: also disable RaMAx entirely? 
+            # "Cancel the replacement" implies setting replace_with_ramax = False?
+            # Let's stick to degrading to Node Mode first, as it's safer.
+            # But user said: "直接取消这个大子树的替换" -> replace_with_ramax = False
+            ancestor_conflict.round.replace_with_ramax = False
 
         self._rebuild_visual()
         self.refresh()
         self._notify(
             node,
-            "Exited subtree-wide RaMAx; the subtree is restored to cactus. Reselect the subtree before enabling nodes individually.",
+            f"Conflict: Subtree mode on ancestor '{ancestor_conflict.name}' has been disabled.",
         )
-        self._show_revert_modal()
-        return True
-
-    def _show_revert_modal(self) -> None:
-        """Show a modal hint so the notice is not lost."""
-
+        
+        # Show modal
         try:
-            app = self.app  # Only available when the Textual app is running; tests may not mount it.
+            app = self.app  # May raise when not running inside a Textual app (e.g., unit tests).
         except Exception:
             app = None
+
         if app and hasattr(app, "push_screen"):
             app.push_screen(
                 InfoModal(
-                    "Bulk mode exited",
+                    "Subtree Mode Disabled",
                     (
-                        "The RaMAx toggle for that subtree has been reverted to cactus.\n\n"
-                        "Reason: you selected a node inside that subtree while in single-node mode.\n\n"
-                        "To reapply in bulk, switch back to subtree mode (press b) and then press space."
+                        f"The ancestor node '{ancestor_conflict.name}' was in Subtree Mode.\n\n"
+                        "Since you are modifying a child node independently, the ancestor's "
+                        "subtree-wide replacement has been cancelled to avoid conflicts."
                     ),
                 )
             )
+            
+        return True
 
     def action_toggle_ascii(self) -> None:
         pass
@@ -1466,6 +1505,7 @@ class RunSettingsScreen(Screen[RunSettings | None]):
         Binding("ctrl+enter", "save", "Run"),
         Binding("ctrl+r", "save", "Run"),
         Binding("v", "toggle_verbose", "Toggle verbose"),
+        Binding("f6", "toggle_view", "View"),
     ]
 
     CSS = """
@@ -1542,6 +1582,7 @@ class RunSettingsScreen(Screen[RunSettings | None]):
         self._input: Input | None = None
         self._verbose: Checkbox | None = None
         self._status: Static | None = None
+        self._view_mode: str = "flow"  # flow | table
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -1550,10 +1591,10 @@ class RunSettingsScreen(Screen[RunSettings | None]):
             with Container(id="run-body"):
                 summary = Static(id="run-summary")
                 self._summary = summary
-                summary.update(plan_overview(self.plan, run_settings=self.current, compact=self.compact))
+                summary.update(self._render_summary(self.current))
                 yield summary
                 with Container(id="run-form"):
-                    yield Static("• Tab/Shift+Tab to move between controls\n• Ctrl+Enter to run immediately\n• V toggles verbose logging", id="run-instructions")
+                    yield Static("• Tab/Shift+Tab to move between controls\n• Ctrl+Enter to run immediately\n• V toggles verbose logging\n• F6 toggles table/flow view", id="run-instructions")
                     verbose_box = Checkbox(
                         "Verbose logging (stream every command output)",
                         value=self.current.verbose,
@@ -1617,6 +1658,11 @@ class RunSettingsScreen(Screen[RunSettings | None]):
             self._verbose.value = not self._verbose.value
             self._refresh_summary()
 
+    def action_toggle_view(self) -> None:
+        # 切换左侧总览的呈现方式（表格/流程图）
+        self._view_mode = "table" if self._view_mode == "flow" else "flow"
+        self._refresh_summary()
+
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "run-threads":
             self.action_save()
@@ -1660,9 +1706,263 @@ class RunSettingsScreen(Screen[RunSettings | None]):
         if not self._summary:
             return
         settings = self._current_settings_preview()
-        self._summary.update(
-            plan_overview(self.plan, run_settings=settings, compact=self.compact)
-        )
+        self._summary.update(self._render_summary(settings))
+
+    def _render_summary(self, settings: RunSettings) -> RenderableType:
+        if self._view_mode == "flow":
+            return self._render_flow_overview(settings)
+        return plan_overview(self.plan, run_settings=settings, compact=self.compact)
+
+    def _render_flow_overview(self, settings: RunSettings) -> Panel:
+        # Header
+        header = Text()
+        header.append("Threads: ", style="dim")
+        header.append("auto" if settings.thread_count is None else str(settings.thread_count), style="bold white")
+        header.append("  Verbose: ", style="dim")
+        header.append("on" if settings.verbose else "off", style="bold green" if settings.verbose else "bold #aaaaaa")
+        
+        canvas_text = self._draw_dependency_tree()
+        
+        content = Group(header, Text(""), canvas_text)
+        return Panel(content, title="[Execution Dependency Tree]", border_style="magenta", padding=(0, 1))
+
+    def _draw_dependency_tree(self) -> Text:
+        """
+        Builds a visual dependency tree of the Rounds based on input/output relationships.
+        Returns a Rich Text object containing the ASCII art.
+        """
+        if not self.plan.rounds:
+            return Text("No rounds planned.", style="dim red")
+
+        node_map: dict[str, Round] = {r.root: r for r in self.plan.rounds}
+        phylo_root = getattr(self.app, "alignment_tree", None)
+        if not phylo_root:
+             return Text("Phylogeny tree missing.", style="dim red")
+        
+        @dataclass
+        class TreeNode:
+            round_entry: Round | None
+            name: str
+            children: list["TreeNode"]
+            width: int = 0
+            x: int = 0
+            y: int = 0
+            is_clustered: bool = False
+            
+        def build_node(phylo_node: tree_utils.AlignmentNode) -> TreeNode:
+            r = node_map.get(phylo_node.name)
+            c_nodes = [build_node(c) for c in phylo_node.children]
+            return TreeNode(round_entry=r, name=phylo_node.name, children=c_nodes)
+
+        root_tree_node = build_node(phylo_root.root)
+
+        def is_relevant(tn: TreeNode) -> bool:
+            if tn.round_entry: return True
+            return any(is_relevant(c) for c in tn.children)
+
+        if not is_relevant(root_tree_node):
+             return Text("No active rounds in tree.", style="dim yellow")
+
+        # Analyze Connectivity and Propagate Subtree Mode
+        def analyze_connectivity(tn: TreeNode, override_as_input: bool = False):
+            if override_as_input:
+                # If a parent is in Subtree Mode, this node ceases to be a Round
+                # and becomes a raw input source for the parent.
+                tn.round_entry = None
+            
+            is_ramax = tn.round_entry and tn.round_entry.replace_with_ramax
+            is_subtree_mode = is_ramax and "--subtree-mode" in tn.round_entry.ramax_opts
+            
+            if is_subtree_mode:
+                tn.is_clustered = True
+                # Propagate the override to all children
+                for c in tn.children:
+                    analyze_connectivity(c, override_as_input=True)
+            else:
+                tn.is_clustered = False
+                # Continue normal recursion
+                for c in tn.children:
+                    analyze_connectivity(c, override_as_input=override_as_input)
+
+        analyze_connectivity(root_tree_node)
+
+        # Layout constants
+        BOX_WIDTH = 14
+        H_GAP = 2
+        V_GAP = 2
+
+        def measure_width(tn: TreeNode) -> int:
+            if not tn.children:
+                tn.width = BOX_WIDTH
+                return BOX_WIDTH
+            c_width = sum(measure_width(c) for c in tn.children) + (len(tn.children) - 1) * H_GAP
+            tn.width = max(BOX_WIDTH, c_width)
+            return tn.width
+
+        measure_width(root_tree_node)
+
+        def layout(tn: TreeNode, start_x: int, depth: int):
+            tn.y = depth * (3 + V_GAP)
+            tn.x = start_x + tn.width // 2
+            
+            total_c_width = sum(c.width for c in tn.children) + (max(0, len(tn.children)-1) * H_GAP)
+            c_start_x = tn.x - total_c_width // 2
+            
+            for c in tn.children:
+                layout(c, c_start_x, depth + 1)
+                c_start_x += c.width + H_GAP
+
+        layout(root_tree_node, 0, 0)
+
+        max_w = root_tree_node.width
+        max_h = 0
+        def get_max_h(tn):
+            nonlocal max_h
+            max_h = max(max_h, tn.y + 3)
+            for c in tn.children: get_max_h(c)
+        get_max_h(root_tree_node)
+
+        # Pixel buffer: (x, y) -> (char, style)
+        pixels: dict[tuple[int, int], tuple[str, str]] = {}
+
+        def put(x, y, char, style="white"):
+            if 0 <= y < max_h + 10 and 0 <= x < max_w + 10:
+                pixels[(x, y)] = (char, style)
+
+        def draw_node_recursive(tn: TreeNode):
+            left = tn.x - BOX_WIDTH // 2
+            top = tn.y
+            
+            is_ramax = tn.round_entry and tn.round_entry.replace_with_ramax
+            
+            if tn.round_entry:
+                if is_ramax:
+                    color = "yellow"
+                    border_color = "yellow"
+                    icon = "R"
+                    use_double = tn.is_clustered
+                else:
+                    color = "cyan"
+                    border_color = "blue"
+                    icon = "C"
+                    use_double = False
+            else:
+                color = "green"
+                border_color = "dim green"
+                icon = "L"
+                use_double = False
+            
+            # Box Chars
+            if use_double:
+                tl, tr, bl, br = "╔", "╗", "╚", "╝"
+                h, v = "═", "║"
+            else:
+                tl, tr, bl, br = "┌", "┐", "└", "┘"
+                h, v = "─", "│"
+            
+            # Box Drawing
+            put(left, top, tl, border_color)
+            for i in range(1, BOX_WIDTH-1): put(left+i, top, h, border_color)
+            put(left+BOX_WIDTH-1, top, tr, border_color)
+            
+            put(left, top+1, v, border_color)
+            
+            raw_label = tn.name
+            content_space = BOX_WIDTH - 2
+            full_str = f"{icon} {raw_label}"
+            if len(full_str) > content_space:
+                full_str = f"{icon} {raw_label[:content_space-4]}.."
+            
+            padding_left = (content_space - len(full_str)) // 2
+            start_x = left + 1 + padding_left
+            
+            put(start_x, top+1, icon, color)
+            for i, char in enumerate(full_str):
+                if i == 0: continue
+                put(start_x + i, top+1, char, "bold white")
+                
+            put(left+BOX_WIDTH-1, top+1, v, border_color)
+            
+            put(left, top+2, bl, border_color)
+            for i in range(1, BOX_WIDTH-1): put(left+i, top+2, h, border_color)
+            put(left+BOX_WIDTH-1, top+2, br, border_color)
+
+            # Connections
+            if tn.children:
+                put(tn.x, top+2, "┴", border_color)
+                
+                mid_y = top + 3
+                put(tn.x, mid_y, "│", border_color)
+                
+                min_cx = min(c.x for c in tn.children)
+                max_cx = max(c.x for c in tn.children)
+                
+                for x in range(min_cx, max_cx + 1):
+                    char = "─"
+                    line_style = "dim white"
+                    
+                    if x == tn.x: char = "┼"
+                    elif x == min_cx: char = "┌"
+                    elif x == max_cx: char = "┐"
+                    
+                    is_child_stem = any(c.x == x for c in tn.children)
+                    if is_child_stem:
+                        if char == "─": char = "┬"
+                        if char == "┌": char = "┌"
+                        if char == "┐": char = "┐"
+                        if char == "┼": char = "┼"
+                    
+                    put(x, mid_y, char, line_style)
+
+                for c in tn.children:
+                    child_is_ramax = c.round_entry and c.round_entry.replace_with_ramax
+                    if is_ramax and child_is_ramax:
+                        conn_style = "yellow"
+                    else:
+                        conn_style = "dim white"
+                        
+                    put(c.x, mid_y+1, "↓", conn_style)
+
+            for c in tn.children:
+                draw_node_recursive(c)
+
+        draw_node_recursive(root_tree_node)
+
+        if not pixels: return Text("Empty Tree", style="red")
+
+        sorted_pixels = sorted(pixels.items(), key=lambda item: (item[0][1], item[0][0]))
+        final_text = Text()
+        row_map: dict[int, list[tuple[int, str, str]]] = {}
+        
+        for (x, y), (char, style) in sorted_pixels:
+            if y not in row_map: row_map[y] = []
+            row_map[y].append((x, char, style))
+
+        min_x = min(k[0] for k in pixels.keys())
+        
+        for y in sorted(row_map.keys()):
+            row_pixels = row_map[y]
+            cursor = min_x
+            for x, char, style in row_pixels:
+                if x > cursor:
+                    final_text.append(" " * (x - cursor))
+                final_text.append(char, style=style)
+                cursor = x + 1
+            final_text.append("\n")
+
+        return final_text
+
+    def _flow_preview_width(self) -> int:
+        try:
+            width = self.size.width
+        except Exception:
+            width = 80
+        return max(40, min(90, width - 18))
+
+    def _shorten(self, text: str, width: int) -> str:
+        if len(text) <= width:
+            return text
+        return text[: width - 1] + "…"
 
 
 class RamaxOptionsModal(ModalScreen[tuple[list[str], list[str]] | None]):
