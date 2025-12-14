@@ -106,3 +106,4 @@ class RunSettings:
 
     verbose: bool = False
     thread_count: Optional[int] = None
+    resume: bool = False

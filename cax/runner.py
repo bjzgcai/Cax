@@ -1,13 +1,16 @@
 """Execution engine for running CAX plans."""
 from __future__ import annotations
 
+import errno
+import json
 import os
+import shutil
 from contextlib import nullcontext
 from pathlib import Path
 import subprocess
 import threading
 import time
-from typing import Optional
+from typing import Any, Optional
 
 import psutil
 from rich.console import Console
@@ -16,6 +19,14 @@ from rich.text import Text
 
 from . import planner
 from .models import Plan, RunSettings
+from .resume import (
+    command_canonical_preview,
+    command_stable_key,
+    index_state_commands,
+    load_run_state_file,
+    outputs_exist,
+    plan_signature,
+)
 
 
 IMPORTANT_KEYWORDS = ("error", "failed", "exception", "critical")
@@ -44,6 +55,7 @@ class PlanRunner:
         self.run_settings = run_settings or RunSettings()
         self.verbose = self.run_settings.verbose
         self.thread_count = self.run_settings.thread_count
+        self.run_state_path = self.log_root / "run_state.json"
 
     def run(self, dry_run: Optional[bool] = None) -> None:
         """Execute the plan. When ``dry_run`` is True, commands are only logged."""
@@ -55,9 +67,28 @@ class PlanRunner:
             thread_count=self.thread_count,
         )
         self.log_root.mkdir(parents=True, exist_ok=True)
+        state = _RunState(self.run_state_path, planned_commands, self.base_dir, self.thread_count)
         total_commands = len(planned_commands)
         completed_commands = 0
         failure_command: planner.PlannedCommand | None = None
+
+        skip_enabled = self.run_settings.resume
+        skipped_indices: set[int] = set()
+        resume_start_index: int | None = None
+        if skip_enabled:
+            if state.mismatched and self.mirror_stdout:
+                self.console.print(
+                    "[yellow][resume][/yellow] Found run_state.json, but the plan signature differs; will attempt command-matching resume."
+                )
+            skipped_indices = state.compute_skips(planned_commands, self.base_dir)
+            if skipped_indices and self.mirror_stdout:
+                self.console.print(
+                    f"[yellow][resume][/yellow] Skipping {len(skipped_indices)} successful steps (run_state.json detected)."
+                )
+            for idx in range(len(planned_commands)):
+                if idx not in skipped_indices:
+                    resume_start_index = idx
+                    break
 
         progress_cm = (
             Progress(
@@ -91,7 +122,28 @@ class PlanRunner:
                         mem="--",
                         mem_peak="--",
                     )
-                for command in planned_commands:
+                for command_index, command in enumerate(planned_commands):
+                    cmd_id = state.command_key(command, command_index)
+                    if command_index in skipped_indices:
+                        state.mark_skipped(cmd_id, command, command_index)
+                        master_log.write(f"[resume] skip {command.display_name}: {command.shell_preview()}\n")
+                        master_log.flush()
+                        if progress is not None and overall_task is not None:
+                            remaining -= 1
+                            progress.advance(overall_task)
+                            progress.update(
+                                overall_task,
+                                description=f"[yellow]⏭ {command.display_name} (resume)[/yellow]",
+                                remaining=remaining,
+                            )
+                        elif self.mirror_stdout:
+                            self.console.print(f"[yellow][resume][/yellow] Skipping {command.display_name}")
+                        completed_commands += 1
+                        continue
+                    entry = state.state["commands"].get(cmd_id)
+                    if skip_enabled:
+                        allow_restart = resume_start_index is not None and command_index == resume_start_index
+                        self._prepare_toil_jobstore(command, entry, allow_restart=allow_restart)
                     preview = command.shell_preview()
                     task_id: TaskID | None = None
                     if isinstance(progress, Progress):
@@ -105,7 +157,8 @@ class PlanRunner:
                         )
                         self._announce_command(preview, progress)
                         task_id = overall_task
-                    success = self._run_single(
+                    state.mark_running(cmd_id, command, command_index)
+                    success, exit_code = self._run_single(
                         command,
                         master_log,
                         effective_dry,
@@ -113,6 +166,7 @@ class PlanRunner:
                         task_id,
                         preview,
                     )
+                    state.mark_result(cmd_id, command, command_index, success, exit_code)
                     if not success:
                         if isinstance(progress, Progress):
                             progress.update(
@@ -156,7 +210,7 @@ class PlanRunner:
         progress: Optional[Progress],
         task_id,
         preview: Optional[str] = None,
-    ) -> bool:
+    ) -> tuple[bool, int]:
         start_time = time.time()
         preview = preview or command.shell_preview()
         master_log.write(f"[start] {command.display_name}: {preview}\n")
@@ -177,7 +231,7 @@ class PlanRunner:
                 )
             elif self.mirror_stdout:
                 self.console.print(f"[yellow][skip][/yellow] {command.display_name} (dry-run {elapsed:.1f}s)")
-            return True
+            return True, 0
 
         if command.workdir:
             command.workdir.mkdir(parents=True, exist_ok=True)
@@ -242,7 +296,7 @@ class PlanRunner:
                     )
                 elif self.mirror_stdout:
                     self.console.print(f"[red][end][/red] {command.display_name} -> {return_code} ({duration:.1f}s)")
-                return False
+                return False, return_code
 
             if progress is not None and task_id is not None:
                 progress.update(
@@ -252,7 +306,7 @@ class PlanRunner:
                 )
             elif self.mirror_stdout:
                 self.console.print(f"[green][end][/green] {command.display_name} ({duration:.1f}s)")
-            return True
+            return True, return_code
 
     def _log_dry_run(self, command: planner.PlannedCommand, preview: str) -> None:
         if command.log_path:
@@ -280,8 +334,13 @@ class PlanRunner:
         progress: Optional[Progress],
         task_id,
         preview: str,
-    ) -> bool:
-        message = f"[error] Failed to launch {command.display_name}: {exc}\n"
+    ) -> tuple[bool, int]:
+        hint = ""
+        if exc.errno == errno.EACCES:
+            resolved = _resolve_executable(command.command[0], self.env.get("PATH"))
+            if resolved and not os.access(resolved, os.X_OK):
+                hint = f" (missing execute bit: {resolved})"
+        message = f"[error] Failed to launch {command.display_name}: {exc}{hint}\n"
         step_log.write(message)
         master_log.write(message)
         master_log.flush()
@@ -293,7 +352,7 @@ class PlanRunner:
             )
         elif self.mirror_stdout:
             self.console.print(f"[red]{message.rstrip()}[/red]")
-        return False
+        return False, -1
 
     def _emit_important(self, line: str, progress: Optional[Progress]) -> None:
         text = line.rstrip()
@@ -333,6 +392,181 @@ class PlanRunner:
             return _to_path(self.plan.out_dir, self.base_dir) / "logs"
         return (self.base_dir / "logs").resolve()
 
+    def _prepare_toil_jobstore(
+        self,
+        command: planner.PlannedCommand,
+        entry: Optional[dict[str, Any]],
+        *,
+        allow_restart: bool,
+    ) -> None:
+        """在断点续跑场景下处理 Toil jobStore 冲突。
+
+        Cactus 的多数步骤使用 Toil；当 jobStore 目录已存在时：
+        - 若上次该步骤处于 running/failed，则追加 `--restart` 以继续执行；
+        - 否则（例如：断点回退导致本次需要重跑），清理该 jobStore 以便从头运行，避免复用旧依赖。
+        """
+
+        step = command.step
+        if step is None or not step.jobstore:
+            return
+
+        jobstore_path = _resolve_jobstore_path(step.jobstore, self.base_dir)
+        if not jobstore_path.exists():
+            return
+
+        status = entry.get("status") if entry else None
+        if status in {"running", "failed"} and not allow_restart:
+            if self.mirror_stdout:
+                self.console.print(
+                    f"[yellow][resume][/yellow] To avoid reusing stale Toil jobStore state, cleaning and rerunning: {jobstore_path}"
+                )
+            try:
+                if jobstore_path.is_dir():
+                    shutil.rmtree(jobstore_path)
+                else:
+                    jobstore_path.unlink()
+            except OSError as exc:
+                if self.mirror_stdout:
+                    self.console.print(f"[yellow][resume][/yellow] Failed to clean jobStore (will still try to run): {exc}")
+            return
+
+        if status in {"running", "failed"} and allow_restart:
+            root_marker = jobstore_path / "files" / "shared" / "rootJobStoreID"
+            if not root_marker.exists():
+                if self.mirror_stdout:
+                    self.console.print(
+                        f"[yellow][resume][/yellow] Detected incomplete Toil jobStore (missing rootJobStoreID); cleaning and rerunning: {jobstore_path}"
+                    )
+                try:
+                    if jobstore_path.is_dir():
+                        shutil.rmtree(jobstore_path)
+                    else:
+                        jobstore_path.unlink()
+                except OSError as exc:
+                    if self.mirror_stdout:
+                        self.console.print(f"[yellow][resume][/yellow] Failed to clean jobStore (will still try to run): {exc}")
+                return
+            if "--restart" not in command.command:
+                command.command = [*command.command, "--restart"]
+            if self.mirror_stdout:
+                self.console.print(
+                    f"[yellow][resume][/yellow] Detected existing Toil jobStore; adding --restart for this step: {jobstore_path}"
+                )
+            return
+
+        if self.mirror_stdout:
+            self.console.print(f"[yellow][resume][/yellow] Cleaning Toil jobStore for rerun: {jobstore_path}")
+        try:
+            if jobstore_path.is_dir():
+                shutil.rmtree(jobstore_path)
+            else:
+                jobstore_path.unlink()
+        except OSError as exc:
+            if self.mirror_stdout:
+                self.console.print(f"[yellow][resume][/yellow] Failed to clean jobStore (will still try to run): {exc}")
+
+
+class _RunState:
+    """轻量级运行状态记录，用于断点续跑。"""
+
+    def __init__(
+        self,
+        path: Path,
+        commands: list[planner.PlannedCommand],
+        base_dir: Path,
+        thread_count: Optional[int],
+    ) -> None:
+        self.path = path
+        self.plan_signature = plan_signature(commands, base_dir, thread_count)
+        self.state: dict[str, Any] = {"plan_signature": self.plan_signature, "commands": {}}
+        self.mismatched = False
+        loaded = self._load()
+        loaded_sig = loaded.get("plan_signature") if loaded else None
+        if loaded and loaded_sig and loaded_sig != self.plan_signature:
+            self.mismatched = True
+        if loaded:
+            self.state["commands"] = index_state_commands(loaded.get("commands", {}))
+        self._write()
+
+    def compute_skips(self, commands: list[planner.PlannedCommand], base_dir: Path) -> set[int]:
+        # 续跑策略：只跳过“前缀连续已完成步骤”，一旦某一步需要重跑，则其后的步骤都视为待执行。
+        #
+        # 原因：计划是顺序执行的，后续步骤通常依赖前面步骤产物；若从中间重跑但仍跳过后续，
+        # 会导致产物与依赖不一致（例如上游 HAL 改变但下游 hal2fasta 仍被跳过）。
+        skips: set[int] = set()
+        for idx, command in enumerate(commands):
+            cmd_id = self.command_key(command, idx)
+            entry = self.state["commands"].get(cmd_id)
+            if entry and entry.get("status") == "success" and outputs_exist(command, base_dir):
+                skips.add(idx)
+                continue
+            break
+        return skips
+
+    def command_key(self, command: planner.PlannedCommand, index: int) -> str:
+        _ = index
+        return command_stable_key(command)
+
+    def mark_running(self, cmd_id: str, command: planner.PlannedCommand, index: int) -> None:
+        self.state["commands"][cmd_id] = {
+            "index": index,
+            "display_name": command.display_name,
+            "preview": command.shell_preview(),
+            "canonical_preview": command_canonical_preview(command),
+            "stable_key": cmd_id,
+            "log_path": str(command.log_path) if command.log_path else None,
+            "status": "running",
+            "updated_at": _now_iso(),
+        }
+        self._write()
+
+    def mark_result(
+        self,
+        cmd_id: str,
+        command: planner.PlannedCommand,
+        index: int,
+        success: bool,
+        exit_code: int,
+    ) -> None:
+        self.state["commands"][cmd_id] = {
+            "index": index,
+            "display_name": command.display_name,
+            "preview": command.shell_preview(),
+            "canonical_preview": command_canonical_preview(command),
+            "stable_key": cmd_id,
+            "log_path": str(command.log_path) if command.log_path else None,
+            "status": "success" if success else "failed",
+            "exit_code": exit_code,
+            "updated_at": _now_iso(),
+        }
+        self._write()
+
+    def mark_skipped(self, cmd_id: str, command: planner.PlannedCommand, index: int) -> None:
+        existing = self.state["commands"].get(cmd_id, {})
+        status = existing.get("status", "success")
+        self.state["commands"][cmd_id] = {
+            "index": index,
+            "display_name": command.display_name,
+            "preview": command.shell_preview(),
+            "canonical_preview": command_canonical_preview(command),
+            "stable_key": cmd_id,
+            "log_path": str(command.log_path) if command.log_path else None,
+            "status": status,
+            "exit_code": existing.get("exit_code"),
+            "updated_at": _now_iso(),
+            "skipped": True,
+        }
+        self._write()
+
+    def _load(self) -> dict[str, Any]:
+        return load_run_state_file(self.path)
+
+    def _write(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self.path.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(self.state, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp_path.replace(self.path)
+
 
 def _format_duration(seconds: float) -> str:
     if seconds < 0:
@@ -346,6 +580,10 @@ def _format_duration(seconds: float) -> str:
     return f"{minutes}m{sec:02d}s"
 
 
+def _now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
 def _format_bytes(value: int) -> str:
     if value <= 0:
         return "0B"
@@ -356,6 +594,24 @@ def _format_bytes(value: int) -> str:
             return f"{num:.1f}{unit}"
         num /= 1024
     return f"{num:.1f}TB"
+
+
+def _resolve_executable(binary: str, path_env: Optional[str]) -> Optional[Path]:
+    """Return the first PATH entry containing *binary* (even if non-executable)."""
+
+    if os.path.isabs(binary):
+        candidate = Path(binary)
+        return candidate if candidate.exists() else None
+
+    if not path_env:
+        path_env = os.environ.get("PATH", "")
+    for entry in path_env.split(os.pathsep):
+        if not entry:
+            continue
+        candidate = Path(entry) / binary
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def _format_cpu(value: Optional[float]) -> str:
@@ -471,3 +727,12 @@ def _to_path(path_like: str, base_dir: Path) -> Path:
     if path.is_absolute():
         return path
     return (base_dir / path).resolve()
+
+
+def _resolve_jobstore_path(jobstore: str, base_dir: Path) -> Path:
+    """解析 Toil jobStore 路径（兼容 `file:` 前缀）。"""
+
+    value = jobstore
+    if value.startswith("file:"):
+        value = value.split(":", 1)[1]
+    return _to_path(value, base_dir)

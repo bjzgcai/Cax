@@ -1,6 +1,6 @@
 # Cactus-RaMAx
 
-Cactus-RaMAx helps you remix alignment plans emitted by `cactus-prepare`. You can inspect every round, toggle RaMAx for any subtree, and then run or export the resulting command list. The current development version (`0.4.0-dev`) keeps the ASCII phylogenetic canvas with subtree/single-node toggle scopes, search, proportional branch spacing, and a bottom HUD that summarizes the current node, coverage, and live system metrics. Subtree Mode now adds a `--subtree-mode` flag, disables descendant RaMAx automatically, and gracefully reverts if you later edit a child node.
+Cactus-RaMAx helps you remix alignment plans emitted by `cactus-prepare`. You can inspect every round, toggle RaMAx for any subtree, and then run or export the resulting command list. The current version (`0.4.0`) keeps the ASCII phylogenetic canvas with subtree/single-node toggle scopes, search, proportional branch spacing, and a bottom HUD that summarizes the current node, coverage, and live system metrics. Subtree Mode is a CAX-only toggle that disables descendant RaMAx automatically and gracefully reverts if you later edit a child node.
 
 ## Environment setup
 
@@ -35,6 +35,7 @@ cax
   - Press **F3** (or type `:template`) to choose from Evolver examples bundled with the package or from your own `~/.cax/templates.json`.
   - Press **F4** or type `!N` (for example `!1`) to recall the Nth entry from `~/.cax/history.json`. The prompt keeps the 20 most recent commands and lets you delete entries from the history window.
 - Before running `cactus-prepare`, CAX infers the effective output directory (from `--outDir` or the parent directory of `--outSeqFile`) and offers to delete existing `--outDir`/`--jobStore` paths so the run starts cleanly.
+- If `logs/run_state.json` is present and you choose to keep existing outputs, the UI opens directly into a resume view (inside Run Settings) showing which steps can be skipped, which will rerun, and where execution resumes.
 - After execution completes, the UI displays the parsed plan and lets you toggle RaMAx replacements before running or exporting.
 - Scripted usage is still supported:
   ```bash

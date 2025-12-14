@@ -2,11 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.4.0-dev] - Unreleased
+## [0.4.0] - 2025-12-14
 
 ### UI
 - Run Settings now has a dual-view toggle (`F6`): switch between the classic plan overview and a new flow view that renders the execution dependency tree as ASCII, so you can see round ordering and ancestry while editing thread/verbose options.
-- Added an explicit Subtree Mode (`--subtree-mode` flag) toggle: enabling it on a node forces RaMAx for that subtree and automatically disables RaMAx on descendants; switching back to node mode removes the flag. Child-level edits now auto-cancel an ancestor’s subtree mode to avoid conflicts (with safe handling when no Textual app is active).
+- When an existing `logs/run_state.json` is detected and you keep the output directories, PlanUI opens directly into a dedicated resume view (inside Run Settings) that shows completed/pending steps and the next command to run.
+- Added an explicit Subtree Mode toggle (CAX-only sentinel, not passed to ramax): enabling it on a node forces RaMAx for that subtree and automatically disables RaMAx on descendants; switching back to node mode removes the sentinel. Child-level edits now auto-cancel an ancestor’s subtree mode to avoid conflicts (with safe handling when no Textual app is active).
 
 ### Fixes
 - Safeguard subtree-mode reversion when no Textual app context exists (tests/CLI), preventing NoActiveAppError during node-level toggles.

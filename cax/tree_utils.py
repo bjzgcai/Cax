@@ -76,7 +76,7 @@ def build_alignment_tree(plan: Plan, base_dir: Optional[Path] = None) -> Optiona
     a valid Newick tree definition.
     """
 
-    newick = _read_newick(plan.out_seq_file, base_dir=base_dir)
+    newick = _read_newick(plan, base_dir=base_dir)
     if not newick:
         return None
     parser = _NewickParser(newick)
@@ -86,13 +86,55 @@ def build_alignment_tree(plan: Plan, base_dir: Optional[Path] = None) -> Optiona
         return None
     round_map = {round_entry.root: round_entry for round_entry in plan.rounds}
     _attach_rounds(root, round_map)
+    _attach_orphans_to_root(root, round_map)
     return AlignmentTree(root)
 
 
-def _read_newick(out_seq_file: str, base_dir: Optional[Path]) -> str | None:
-    path = Path(out_seq_file).expanduser()
-    if not path.is_absolute() and base_dir is not None:
-        path = (Path(base_dir) / path).expanduser().resolve()
+def _read_newick(plan: Plan, base_dir: Optional[Path]) -> str | None:
+    """Return the Newick string for *plan*.
+
+    Preferred source: ``plan.out_seq_file``. If missing, fall back to the input
+    file path found in the first cactus-preprocess step.
+    """
+
+    # Primary: out_seq_file
+    path = _resolve_path(plan.out_seq_file, base_dir)
+    newick = _read_first_nonempty_line(path)
+    if newick:
+        return newick
+
+    # Fallback: try to infer input file from preprocess step
+    for step in plan.preprocess:
+        tokens = step.raw.split()
+        candidates = _candidate_paths_from_tokens(tokens, base_dir)
+        for candidate in candidates:
+            newick = _read_first_nonempty_line(candidate)
+            if newick:
+                return newick
+        break  # only need first preprocess step
+    return None
+
+
+def _candidate_paths_from_tokens(tokens: list[str], base_dir: Optional[Path]) -> list[Path]:
+    paths: list[Path] = []
+    for tok in tokens:
+        if tok.startswith("-"):
+            continue
+        candidate = _resolve_path(tok, base_dir)
+        if candidate.exists() and candidate.is_file():
+            paths.append(candidate)
+    return paths
+
+
+def _resolve_path(path_like: str, base_dir: Optional[Path]) -> Path:
+    path = Path(path_like).expanduser()
+    if path.is_absolute():
+        return path
+    base = Path(base_dir) if base_dir else Path.cwd()
+    return (base / path).resolve()
+
+
+def _read_first_nonempty_line(path: Path) -> str | None:
     if not path.exists():
         return None
     try:
@@ -112,6 +154,37 @@ def _attach_rounds(node: AlignmentNode, round_map: dict[str, Round]) -> None:
     for child in node.children:
         child.parent = node
         _attach_rounds(child, round_map)
+
+
+def _attach_orphans_to_root(root: AlignmentNode, round_map: dict[str, Round]) -> None:
+    """Attach a single unmatched round to an unnamed root so it can be toggled in the UI.
+
+    Some cactus-prepare outputs leave the outermost Newick node unnamed, while the last
+    round (e.g. Anc0) targets that implied root. If exactly one round remains unattached
+    and the parsed root currently lacks a round, bind it there to keep ancestor/descendant
+    logic intact.
+    """
+
+    attached_roots: set[str] = set()
+
+    def _collect(node: AlignmentNode) -> None:
+        if node.round:
+            attached_roots.add(node.round.root)
+        for child in node.children:
+            _collect(child)
+
+    _collect(root)
+    unmatched = [rnd for rnd in round_map.values() if rnd.root not in attached_roots]
+    if len(unmatched) == 1 and root.round is None and (not root.name):
+        root.round = unmatched.pop()
+
+    if unmatched:
+        existing_names = {child.name for child in root.children if child.name}
+        for rnd in unmatched:
+            if rnd.root in existing_names:
+                continue
+            child = AlignmentNode(name=rnd.root, children=[], round=rnd, parent=root)
+            root.children.append(child)
 
 
 class _NewickParser:

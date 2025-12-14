@@ -261,6 +261,7 @@ def _classify_kind(first_token: str, default_kind: Optional[str]) -> str:
         "cactus-align": "align",
         "hal2fasta": "hal2fasta",
         "halAppendSubtree": "halmerge",
+        "ramax": "ramax",
         "RaMAx": "ramax",
     }
     kind = mapping.get(first_token)

@@ -11,7 +11,7 @@ from rich import print
 import shutil
 
 from . import command_prompt, history, parser, ui as ui_module
-from .models import RunSettings
+from .models import Plan, RunSettings
 from .runner import PlanRunner
 
 app = typer.Typer(help="Cactus-RaMAx interactive tools (ui only)")
@@ -68,16 +68,18 @@ def ui(
         executable = prompt_result.executable or executable
 
     out_dir_preview, job_store_preview = _prepare_plan_preview(executable, prepare_args, from_file)
-    _ensure_clean_environment(out_dir_preview, job_store_preview)
+    resume_preselected = _ensure_clean_environment(out_dir_preview, job_store_preview)
     text = _load_prepare_text(prepare_args, from_file, executable=executable)
     plan = parser.parse_prepare_script(text)
-    run_settings = RunSettings(verbose=False, thread_count=threads)
+    run_settings = RunSettings(verbose=False, thread_count=threads, resume=resume_preselected)
+
+    # 若用户在启动时选择保留 run_state，UI 会自动进入续跑专属界面（可查看已完成/待执行并微调后续命令）。
     result = ui_module.launch(plan, run_settings=run_settings)
     plan = result.plan
     run_settings = result.run_settings or run_settings
     if result.action == "run" or run_after:
         if result.action != "run":
-            run_settings = _prompt_run_settings(run_settings)
+            run_settings = _prompt_run_settings(run_settings, plan)
         runner = PlanRunner(plan, run_settings=run_settings)
         runner.run()
     else:
@@ -88,13 +90,18 @@ if __name__ == "__main__":
     app()
 
 
-def _prompt_run_settings(defaults: RunSettings) -> RunSettings:
+def _prompt_run_settings(defaults: RunSettings, plan: Plan | None = None) -> RunSettings:
     """Collect run-time settings from the user just before execution."""
 
     typer.echo("[cax] Configure run settings before execution:")
     verbose = typer.confirm(
         "Enable verbose logging (stream every command output)?",
         default=defaults.verbose,
+    )
+
+    resume = typer.confirm(
+        "Enable resume mode (record run state and skip successful steps next time)?",
+        default=defaults.resume,
     )
 
     thread_count = defaults.thread_count
@@ -120,7 +127,9 @@ def _prompt_run_settings(defaults: RunSettings) -> RunSettings:
         thread_count = value
         break
 
-    return RunSettings(verbose=verbose, thread_count=thread_count)
+    settings = RunSettings(verbose=verbose, thread_count=thread_count, resume=resume)
+
+    return settings
 
 
 def _prepare_plan_preview(
@@ -173,12 +182,17 @@ def _discover_out_dir(tokens: list[str]) -> Optional[Path]:
     return None
 
 
-def _ensure_clean_environment(out_dir: Optional[str], job_store: Optional[str]) -> None:
-    """Before running cactus-prepare, optionally clean existing output directories."""
+def _ensure_clean_environment(out_dir: Optional[str], job_store: Optional[str]) -> bool:
+    """Before running cactus-prepare, optionally clean existing output directories.
+
+    返回值：True 表示用户选择保留现有目录以便断点续跑；False 表示已清理或无需保留。
+    """
 
     candidates: list[Path] = []
+    run_state_path: Optional[Path] = None
     if out_dir:
         out_path = _resolve_path(out_dir)
+        run_state_path = out_path / "logs" / "run_state.json"
         candidates.append(out_path)
     if job_store:
         job_path = _resolve_path(job_store)
@@ -195,9 +209,11 @@ def _ensure_clean_environment(out_dir: Optional[str], job_store: Optional[str]) 
             existing.append(resolved)
 
     if not existing:
-        return
+        return False
 
-    typer.echo("[cax] Warning: existing directories detected:")
+    resume_available = run_state_path is not None and run_state_path.exists()
+
+    typer.echo("[cax] Detected existing paths:")
     for path in existing:
         try:
             relative = path.relative_to(Path.cwd())
@@ -205,20 +221,29 @@ def _ensure_clean_environment(out_dir: Optional[str], job_store: Optional[str]) 
         except ValueError:
             typer.echo(f"  - {path}")
 
-    if typer.confirm("Delete these directories before running cactus-prepare?", default=False):
-        for path in existing:
-            if not path.exists():
-                continue
-            try:
-                if path.is_dir():
-                    shutil.rmtree(path)
-                else:
-                    path.unlink()
-            except OSError as exc:
-                typer.echo(f"[cax] Failed to remove {path}: {exc}")
-        typer.echo("[cax] Existing directories removed.")
+    if resume_available:
+        if typer.confirm(
+            "Found logs/run_state.json. Keep existing outputs to resume?",
+            default=True,
+        ):
+            typer.echo("[cax] Keeping existing outputs; continuing.")
+            return True
+        typer.echo("[cax] Cleaning outputs and restarting.")
     else:
-        typer.echo("[cax] Keeping existing directories (may reuse previous outputs).")
+        typer.echo("[cax] No run_state.json found; cleaning old outputs and jobStore before starting.")
+
+    for path in existing:
+        if not path.exists():
+            continue
+        try:
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+        except OSError as exc:
+            typer.echo(f"[cax] Failed to remove {path}: {exc}")
+    typer.echo("[cax] Cleanup complete.")
+    return False
 
 
 def _resolve_path(path_like: str) -> Path:

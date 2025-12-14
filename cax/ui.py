@@ -26,9 +26,37 @@ from rich.tree import Tree
 from rich.align import Align
 from rich.console import Group
 
-from . import planner, tree_utils
+from . import planner, resume as resume_utils, tree_utils
 from .models import Plan, Round, RunSettings, Step
 from .planner import PlannedCommand
+
+
+SUBTREE_MODE_FLAG = "--subtree-mode"
+
+
+def _is_subtree_mode_round(round_entry: Round) -> bool:
+    return round_entry.replace_with_ramax and SUBTREE_MODE_FLAG in round_entry.ramax_opts
+
+
+def _is_effective_ramax_node(node: tree_utils.AlignmentNode) -> bool:
+    """判断节点在执行层面是否等价于 RaMAx。
+
+    说明：
+    - `replace_with_ramax=True` 的 round 当然是 RaMAx。
+    - 若任一祖先 round 处于 Subtree Mode（`--subtree-mode`），其子树内的 round 虽然会被标记成 Cactus
+      以避免混合状态，但执行时会被祖先 RaMAx 吸收，因此 UI 需要按“有效模式”展示为 RaMAx。
+    """
+
+    if not node.round:
+        return False
+    if node.round.replace_with_ramax:
+        return True
+    current = getattr(node, "parent", None)
+    while current:
+        if current.round and _is_subtree_mode_round(current.round):
+            return True
+        current = getattr(current, "parent", None)
+    return False
 
 
 @dataclass
@@ -526,7 +554,7 @@ class AsciiPhylo(Static):
         """
         Toggle Subtree Mode (Mode B):
         - Enable RaMAx for this node.
-        - Add '--subtree-mode' flag.
+        - 标记内部“subtree-mode”（仅用于 CAX 控制，不会传给 ramax）。
         - Disable RaMAx for all descendant nodes (as they are subsumed).
         """
         if not self._cursor.round:
@@ -901,13 +929,25 @@ class AsciiPhylo(Static):
         if highlight_subtree and self._cursor:
             highlighted_nodes = self._collect_subtree_nodes(self._cursor)
 
+        # 计算每个节点“执行层面”的有效 RaMAx 状态：当祖先处于 Subtree Mode 时，后代 round 也视为 RaMAx。
+        effective_ramax: dict[tree_utils.AlignmentNode, bool] = {}
+
+        def propagate_effective(node: tree_utils.AlignmentNode, covered: bool) -> None:
+            node_effective = bool(node.round and (node.round.replace_with_ramax or covered))
+            effective_ramax[node] = node_effective
+            subtree_cover = covered or bool(node.round and _is_subtree_mode_round(node.round))
+            for child in self._ordered_children.get(node, node.children):
+                propagate_effective(child, subtree_cover)
+
+        propagate_effective(self._root, False)
+
         def label_for(node: tree_utils.AlignmentNode) -> str:
             """Return the full label text without truncation."""
             name = node.name or "(unnamed)"
             parts = [name]
             if node.round:
                 # Keep round state only; no extra leaf marker.
-                tag = "[RaMAx]" if node.round.replace_with_ramax else "[Cactus]"
+                tag = "[RaMAx]" if effective_ramax.get(node, False) else "[Cactus]"
                 parts.append(tag)
             return " ".join(parts)
 
@@ -938,7 +978,7 @@ class AsciiPhylo(Static):
             indicator_char = "│" # Default
             indicator_style = "#6272a4" 
 
-            if node.round and node.round.replace_with_ramax:
+            if node.round and effective_ramax.get(node, False):
                 indicator_char = "❚" # Golden bar
                 indicator_style = "#fcbf49"
 
@@ -959,7 +999,7 @@ class AsciiPhylo(Static):
                 display_text_object.append(f"【 {icon}{label_text} 】", style="bold #1e1e2e on #bd93f9")
             
             # --- Scheme A: RaMAx State ---
-            elif node.round and node.round.replace_with_ramax:
+            elif node.round and effective_ramax.get(node, False):
                 display_text_object.append(f"{icon}{label_text}", style="bold #1e1e2e on #fcbf49")
             
             # --- Scheme A: Subtree Scope Highlight ---
@@ -1161,8 +1201,19 @@ class DashboardHUD(Static):
     def _subtree_stats(self, node: tree_utils.AlignmentNode) -> dict[str, object]:
         rounds = list(node.iter_rounds())
         total_rounds = len(rounds)
-        ramax_rounds = sum(1 for r in rounds if r.replace_with_ramax)
         hal2fasta = sum(len(r.hal2fasta_steps) for r in rounds)
+
+        # 子树模式（Subtree Mode）下，后代 round 会被标记成 Cactus 以避免混合状态，但执行上会被祖先 RaMAx 吸收；
+        # 这里统计覆盖率时应使用“有效 RaMAx”口径，否则用户看到的覆盖率会与实际执行计划不一致。
+        ramax_rounds = 0
+        stack: list[tuple[tree_utils.AlignmentNode, bool]] = [(node, False)]
+        while stack:
+            current, covered = stack.pop()
+            if current.round and (current.round.replace_with_ramax or covered):
+                ramax_rounds += 1
+            subtree_cover = covered or bool(current.round and _is_subtree_mode_round(current.round))
+            for child in current.children:
+                stack.append((child, subtree_cover))
 
         def _depth(n: tree_utils.AlignmentNode) -> int:
             if not n.children:
@@ -1194,7 +1245,7 @@ class DashboardHUD(Static):
     def _render_dashboard(self, node: tree_utils.AlignmentNode) -> Table:
         # Mode and theme color
         if node.round:
-            if node.round.replace_with_ramax:
+            if _is_effective_ramax_node(node):
                 mode_icon = "⚡"
                 mode_name = "RaMAx Accelerated"
                 theme_color = "yellow"
@@ -1573,16 +1624,23 @@ class RunSettingsScreen(Screen[RunSettings | None]):
     }
     """
 
-    def __init__(self, plan: Plan, current: RunSettings, compact: bool):
+    def __init__(
+        self,
+        plan: Plan,
+        current: RunSettings,
+        compact: bool,
+        resume_available: bool = False,
+    ):
         super().__init__()
         self.plan = plan
         self.current = current
         self.compact = compact
+        self.resume_available = resume_available
         self._summary: Static | None = None
         self._input: Input | None = None
         self._verbose: Checkbox | None = None
         self._status: Static | None = None
-        self._view_mode: str = "flow"  # flow | table
+        self._view_mode: str = "resume" if (resume_available and current.resume) else "flow"  # resume | flow | table
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -1594,7 +1652,7 @@ class RunSettingsScreen(Screen[RunSettings | None]):
                 summary.update(self._render_summary(self.current))
                 yield summary
                 with Container(id="run-form"):
-                    yield Static("• Tab/Shift+Tab to move between controls\n• Ctrl+Enter to run immediately\n• V toggles verbose logging\n• F6 toggles table/flow view", id="run-instructions")
+                    yield Static("• Tab/Shift+Tab to move between controls\n• Ctrl+Enter to run immediately\n• V toggles verbose logging\n• F6 toggles overview view", id="run-instructions")
                     verbose_box = Checkbox(
                         "Verbose logging (stream every command output)",
                         value=self.current.verbose,
@@ -1647,8 +1705,10 @@ class RunSettingsScreen(Screen[RunSettings | None]):
             self._update_status(error)
             return
         self._update_status("")
-        verbose = self._verbose.value if self._verbose else False
-        self.dismiss(RunSettings(verbose=verbose, thread_count=threads))
+        settings = self._current_settings_preview()
+        # 替换线程数为已校验的值，避免在预览中使用旧值
+        settings.thread_count = threads
+        self.dismiss(settings)
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -1659,8 +1719,16 @@ class RunSettingsScreen(Screen[RunSettings | None]):
             self._refresh_summary()
 
     def action_toggle_view(self) -> None:
-        # 切换左侧总览的呈现方式（表格/流程图）
-        self._view_mode = "table" if self._view_mode == "flow" else "flow"
+        # 切换左侧总览的呈现方式：有续跑状态时支持 resume/flow/table 三态，否则保持 flow/table 二态。
+        if self.resume_available:
+            modes = ("resume", "flow", "table")
+            try:
+                idx = modes.index(self._view_mode)
+            except ValueError:
+                idx = 0
+            self._view_mode = modes[(idx + 1) % len(modes)]
+        else:
+            self._view_mode = "table" if self._view_mode == "flow" else "flow"
         self._refresh_summary()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
@@ -1700,7 +1768,7 @@ class RunSettingsScreen(Screen[RunSettings | None]):
         verbose = self._verbose.value if self._verbose else self.current.verbose
         ok, threads, _ = self._validate_threads()
         thread_val = threads if ok else self.current.thread_count
-        return RunSettings(verbose=verbose, thread_count=thread_val)
+        return RunSettings(verbose=verbose, thread_count=thread_val, resume=self.current.resume)
 
     def _refresh_summary(self) -> None:
         if not self._summary:
@@ -1709,9 +1777,58 @@ class RunSettingsScreen(Screen[RunSettings | None]):
         self._summary.update(self._render_summary(settings))
 
     def _render_summary(self, settings: RunSettings) -> RenderableType:
+        if self._view_mode == "resume":
+            return self._render_resume_overview(settings)
         if self._view_mode == "flow":
             return self._render_flow_overview(settings)
         return plan_overview(self.plan, run_settings=settings, compact=self.compact)
+
+    def _render_resume_overview(self, settings: RunSettings) -> RenderableType:
+        app = self.app
+        base_dir = app.base_dir if isinstance(app, PlanUIApp) else Path.cwd()
+
+        preview = resume_utils.preview_resume(
+            self.plan,
+            base_dir=base_dir,
+            thread_count=settings.thread_count,
+        )
+        rows = resume_utils.command_rows(
+            self.plan,
+            base_dir=base_dir,
+            thread_count=settings.thread_count,
+        )
+
+        next_row = next((row for row in rows if row.status != resume_utils.STATUS_COMPLETED), None)
+        header = Text()
+        header.append("Resume: ", style="bold cyan")
+        if not settings.resume:
+            header.append("disabled (full run)", style="dim")
+        elif next_row is None:
+            header.append("all steps are skippable (outputs present)", style="bold green")
+        else:
+            header.append(f"starts at step {next_row.index}: ", style="dim")
+            header.append(next_row.name, style="bold white")
+
+        if preview is None:
+            message = Panel(
+                "Unable to read run_state.json (missing or invalid). The plan will run in full; to resume, ensure the state file exists and is readable.",
+                border_style="yellow",
+            )
+            return Group(header, Text(""), message, resume_utils.render_command_table(rows, limit=200))
+
+        summary_table, state_panel = resume_utils.render_summary(preview)
+        warning: Panel | None = None
+        if not preview.plan_matches:
+            warning = Panel(
+                "Note: the plan signature in the state file does not match the current plan (thread count / edits can cause this).\n"
+                "Resume will skip only the contiguous completed prefix using command matching + output checks; once a step needs rerun, all subsequent steps will rerun.",
+                border_style="yellow",
+            )
+        parts: list[RenderableType] = [header, Text(""), summary_table, state_panel]
+        if warning is not None:
+            parts.insert(2, warning)
+        parts.append(resume_utils.render_command_table(rows, limit=200))
+        return Group(*parts)
 
     def _render_flow_overview(self, settings: RunSettings) -> Panel:
         # Header
@@ -1722,7 +1839,7 @@ class RunSettingsScreen(Screen[RunSettings | None]):
         header.append("on" if settings.verbose else "off", style="bold green" if settings.verbose else "bold #aaaaaa")
         
         canvas_text = self._draw_dependency_tree()
-        
+
         content = Group(header, Text(""), canvas_text)
         return Panel(content, title="[Execution Dependency Tree]", border_style="magenta", padding=(0, 1))
 
@@ -2215,6 +2332,8 @@ class PlanUIApp(App[UIResult]):
         self.plan = plan
         self.base_dir = Path(base_dir) if base_dir else Path.cwd()
         self.alignment_tree = tree_utils.build_alignment_tree(plan, base_dir=self.base_dir)
+        self._run_state_path = self._resolve_run_state_path()
+        self.resume_available = self._run_state_path.exists()
         self.canvas: AsciiPhylo | None = None
         self.run_settings = run_settings or RunSettings()
         self.hud: DashboardHUD | None = None
@@ -2244,8 +2363,20 @@ class PlanUIApp(App[UIResult]):
             preview = plan_overview(self.plan, run_settings=self.run_settings, compact=self._is_compact())
             self.detail_panel.update(preview)
         
-        # Delay the welcome overlay slightly so the UI renders first.
-        self.set_timer(0.3, self._show_welcome_guide)
+        if self.run_settings.resume and self.resume_available:
+            # 断点续跑专属入口：直接进入运行设置/续跑摘要界面。
+            self.set_timer(0.05, self.action_run_plan)
+        else:
+            # Delay the welcome overlay slightly so the UI renders first.
+            self.set_timer(0.3, self._show_welcome_guide)
+
+    def _resolve_run_state_path(self) -> Path:
+        if self.plan.out_dir:
+            out_dir = Path(self.plan.out_dir).expanduser()
+            if not out_dir.is_absolute():
+                out_dir = (self.base_dir / out_dir).resolve()
+            return (out_dir / "logs" / "run_state.json").resolve()
+        return (self.base_dir / "logs" / "run_state.json").resolve()
 
     def _show_welcome_guide(self) -> None:
         welcome_text = (
@@ -2308,7 +2439,12 @@ class PlanUIApp(App[UIResult]):
         self._show_round(round_index)
 
     def action_run_plan(self) -> None:
-        screen = RunSettingsScreen(self.plan, self.run_settings, compact=self._is_compact())
+        screen = RunSettingsScreen(
+            self.plan,
+            self.run_settings,
+            compact=self._is_compact(),
+            resume_available=self.resume_available,
+        )
         self.push_screen(screen, self._finalize_run_settings)
 
     def export_commands(self, settings: RunSettings | None = None, *, notify_detail: bool = True) -> Path | None:

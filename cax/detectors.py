@@ -86,7 +86,7 @@ def system_resources() -> dict[str, str]:
 def environment_summary() -> dict[str, Optional[str]]:
     """Return a dictionary summarising key binaries and hardware."""
 
-    ramax = executable_info("RaMAx", ["--version"])
+    ramax = executable_info("ramax", ["--version"])
     cactus_exec = executable_info("cactus", ["--version"])
     # Prefer user-specified commands when deriving the cactus version
     cactus_version = detect_cactus_version() or (cactus_exec.version)

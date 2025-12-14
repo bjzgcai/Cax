@@ -51,6 +51,9 @@ def build_execution_plan(
         )
 
     for round_entry in plan.rounds:
+        if _is_absorbed_by_subtree_ramax(round_entry, tree):
+            # Ancestor subtree-mode RaMAx already covers this round; skip all steps here.
+            continue
         if _is_descendant_ramax(round_entry, tree):
             # An ancestor already uses RaMAx; running it again here would be redundant.
             continue
@@ -141,6 +144,9 @@ def _from_step(
     )
 
 
+SUBTREE_FLAG = "--subtree-mode"
+
+
 def _ramax_command(
     plan: Plan,
     round_entry: Round,
@@ -155,7 +161,7 @@ def _ramax_command(
         command = _split_command(round_entry.manual_ramax_command)
     else:
         command = [
-            "RaMAx",
+            "ramax",
             "-i",
             plan.out_seq_file,
             "-o",
@@ -165,8 +171,8 @@ def _ramax_command(
         ]
         if workdir:
             command.extend(["-w", workdir])
-        command.extend(plan.global_ramax_opts)
-        command.extend(round_entry.ramax_opts)
+        command.extend(_filtered_ramax_opts(plan.global_ramax_opts))
+        command.extend(_filtered_ramax_opts(round_entry.ramax_opts))
         command = _ensure_ramax_threads(command, thread_count)
 
     log_path = _guess_ramax_log_path(plan, round_entry, base_dir)
@@ -174,13 +180,22 @@ def _ramax_command(
     workdir_path = Path(workdir).expanduser() if workdir else None
     if workdir_path and not workdir_path.is_absolute():
         workdir_path = (base_dir / workdir_path).resolve()
+
+    # 为 RaMAx 命令补齐 out_files，使断点续跑能检查 HAL 产物是否存在。
+    ramax_step = Step(
+        raw=shlex.join(command),
+        kind="ramax",
+        out_files=[round_entry.target_hal],
+        root=round_entry.root,
+        log_file=str(log_path) if log_path else None,
+    )
     return PlannedCommand(
         command=command,
         category="ramax",
-        display_name=f"RaMAx-{round_entry.root}",
+        display_name=f"ramax-{round_entry.root}",
         log_path=log_path,
         round_name=round_entry.name,
-        step=None,
+        step=ramax_step,
         is_ramax=True,
         workdir=workdir_path,
     )
@@ -265,6 +280,12 @@ def _ensure_cactus_threads(command: List[str], thread_count: Optional[int]) -> L
     return adjusted
 
 
+def _filtered_ramax_opts(options: List[str]) -> List[str]:
+    """Drop CAX-only sentinel flags before invoking ramax."""
+
+    return [opt for opt in options if opt != SUBTREE_FLAG]
+
+
 def _ensure_ramax_threads(command: List[str], thread_count: Optional[int]) -> List[str]:
     if thread_count is None or not command:
         return command
@@ -299,6 +320,30 @@ def _is_descendant_ramax(round_entry: Round, tree: Optional[tree_utils.Alignment
     while ancestor:
         if ancestor.round and ancestor.round.replace_with_ramax:
             return True
+        ancestor = ancestor.parent
+    return False
+
+
+def _is_absorbed_by_subtree_ramax(
+    round_entry: Round, tree: Optional[tree_utils.AlignmentTree]
+) -> bool:
+    """Return True when an ancestor round is in subtree-mode RaMAx, so this round should be skipped entirely.
+
+    Subtree Mode represents "run RaMAx at this ancestor and absorb descendants". Descendants may have
+    ``replace_with_ramax`` cleared to avoid mixed modes, but they should not execute their cactus steps
+    either once the ancestor covers the subtree.
+    """
+
+    if tree is None:
+        return False
+    node = tree.find(round_entry.root)
+    if node is None:
+        return False
+    ancestor = node.parent
+    while ancestor:
+        if ancestor.round and ancestor.round.replace_with_ramax:
+            if SUBTREE_FLAG in ancestor.round.ramax_opts:
+                return True
         ancestor = ancestor.parent
     return False
 
